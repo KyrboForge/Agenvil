@@ -17,7 +17,9 @@
 | `agenvil build` | mutating | build staged output (never `~/.claude`) |
 
 `--root <DIR>` selects the project root; the default is the current directory. The config file is
-always `<root>/agenvil.toml` (no search of parent directories).
+always `<root>/agenvil.toml` (no search of parent directories). It must be a regular file of at
+most 1 MiB; a symlinked `agenvil.toml` is rejected without being read, so the config cannot point
+outside the root.
 
 ## Exit codes
 
@@ -44,8 +46,9 @@ See [`examples/agenvil.toml`](examples/agenvil.toml); it is parsed by a unit tes
 | `[policy.models.claude]` | table | empty | accepted but has no keys yet |
 
 - Unknown keys are rejected everywhere, so typos and not-yet-supported options fail loudly.
-- Paths are relative to the project root, non-empty, and cannot be absolute or contain `..`.
-  This check is lexical; symlinks are not resolved.
+- Paths are relative to the project root, non-empty, use `/` as separator and cannot start with
+  `/` or contain `..`, `\` or `:`. The same rules apply on every OS, so Windows drive and UNC paths
+  are rejected everywhere. This check is lexical; symlinks inside the tree are not resolved.
 - **Version policy:** `schema` is bumped only for incompatible changes. A file with a different
   `schema` is rejected as unsupported before any other key is validated.
 

@@ -1,6 +1,8 @@
 //! Typed, strict loading of `agenvil.toml`.
 
-use std::path::{Component, Path, PathBuf};
+use std::fs::File;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -8,6 +10,8 @@ use serde::Deserialize;
 pub const FILE_NAME: &str = "agenvil.toml";
 /// The only supported `schema` value.
 pub const SCHEMA_VERSION: i64 = 1;
+/// Size limit for `agenvil.toml`; real files are a few hundred bytes.
+pub const MAX_FILE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -16,6 +20,10 @@ pub enum ConfigError {
         path: PathBuf,
         source: std::io::Error,
     },
+    #[error("invalid {}: must be a regular file, not a symlink, directory or special file", .path.display())]
+    NotRegularFile { path: PathBuf },
+    #[error("invalid {}: larger than the {MAX_FILE_BYTES}-byte limit", .path.display())]
+    TooLarge { path: PathBuf },
     #[error("invalid {}: {source}", .path.display())]
     Parse {
         path: PathBuf,
@@ -104,6 +112,9 @@ pub struct ClaudeModels {}
 
 /// A non-empty path relative to the project root that cannot escape it.
 ///
+/// Validated on the string, not with `Path::components`, so a file is accepted or rejected
+/// the same way on every OS: `/` separators only; `\`, `:`, a leading `/` and `..` are rejected.
+///
 /// shortcut: checked lexically, symlinks are not resolved; resolve them when discovery reads the tree.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "String")]
@@ -119,16 +130,17 @@ impl TryFrom<String> for RelPath {
     type Error = String;
 
     fn try_from(value: String) -> Result<Self, String> {
-        let path = PathBuf::from(&value);
-        let relative = path
-            .components()
-            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
-        if !relative || !path.components().any(|c| matches!(c, Component::Normal(_))) {
+        let segments = || value.split('/');
+        let portable = !value.starts_with('/') && !value.contains(['\\', ':']);
+        if !portable
+            || segments().any(|s| s == "..")
+            || segments().all(|s| s.is_empty() || s == ".")
+        {
             return Err(format!(
-                "path `{value}` must be non-empty, relative to the project root and stay inside it"
+                "path `{value}` must be non-empty, use `/` separators, be relative to the project root and stay inside it"
             ));
         }
-        Ok(Self(path))
+        Ok(Self(PathBuf::from(value)))
     }
 }
 
@@ -143,10 +155,26 @@ impl Config {
     /// Loads `<root>/agenvil.toml`.
     pub fn load(root: &Path) -> Result<Self, ConfigError> {
         let path = root.join(FILE_NAME);
-        let text = std::fs::read_to_string(&path).map_err(|source| ConfigError::Read {
+        let read_err = |source| ConfigError::Read {
             path: path.clone(),
             source,
-        })?;
+        };
+        // lstat, so a symlink pointing outside the root is refused unread; also refuses FIFOs before open.
+        // shortcut: lstat-then-open races a concurrent local attacker; open with O_NOFOLLOW if that is in scope.
+        let meta = std::fs::symlink_metadata(&path).map_err(read_err)?;
+        if !meta.is_file() {
+            return Err(ConfigError::NotRegularFile { path: path.clone() });
+        }
+        let mut text = String::new();
+        if meta.len() <= MAX_FILE_BYTES {
+            // `take` keeps the bound even if the file grows after the metadata check.
+            File::open(&path)
+                .and_then(|file| file.take(MAX_FILE_BYTES + 1).read_to_string(&mut text))
+                .map_err(read_err)?;
+        }
+        if meta.len() > MAX_FILE_BYTES || text.len() as u64 > MAX_FILE_BYTES {
+            return Err(ConfigError::TooLarge { path: path.clone() });
+        }
         Self::parse(&text, &path)
     }
 
@@ -251,15 +279,32 @@ mod tests {
 
     #[test]
     fn paths_cannot_be_empty_absolute_or_escape_the_root() {
-        for bad in ["", ".", "/etc", "../x", "a/../../b", "a/.."] {
+        // Same verdict on every OS: Windows drive and UNC forms are rejected on Unix too.
+        for bad in [
+            "",
+            ".",
+            "./",
+            "/etc",
+            "../x",
+            "a/../../b",
+            "a/..",
+            r"a\b",
+            r"C:\Users\x",
+            "C:foo",
+            "C:/x",
+            r"\\server\share",
+            "//server/share",
+        ] {
+            // TOML literal strings, so backslashes reach the validator unescaped.
             let message = err(&format!(
-                "schema = 1\n[project]\nname = \"x\"\n[paths]\nagents = \"{bad}\"\n"
+                "schema = 1\n[project]\nname = \"x\"\n[paths]\nagents = '{bad}'\n"
             ));
             assert!(message.contains("stay inside"), "{bad:?} -> {message}");
         }
-        assert!(
-            parse("schema = 1\n[project]\nname = \"x\"\n[paths]\nagents = \"./a/b\"\n").is_ok()
-        );
+        for good in ["./a/b", "a//b", ".agents", "a b/c"] {
+            let text = format!("schema = 1\n[project]\nname = \"x\"\n[paths]\nagents = '{good}'\n");
+            assert!(parse(&text).is_ok(), "{good:?}");
+        }
     }
 
     #[test]
@@ -271,5 +316,48 @@ mod tests {
         ));
         std::fs::write(dir.path().join(FILE_NAME), MINIMAL).unwrap();
         assert_eq!(Config::load(dir.path()).unwrap().project.name, "demo");
+    }
+
+    #[test]
+    fn load_rejects_non_regular_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(FILE_NAME)).unwrap();
+        assert!(matches!(
+            Config::load(dir.path()),
+            Err(ConfigError::NotRegularFile { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_refuses_symlinked_config_without_reading_its_target() {
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("private.toml");
+        std::fs::write(&target, "TOP-SECRET = = broken").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(&target, root.path().join(FILE_NAME)).unwrap();
+
+        let error = Config::load(root.path()).unwrap_err();
+        assert!(
+            matches!(error, ConfigError::NotRegularFile { .. }),
+            "{error}"
+        );
+        assert!(!error.to_string().contains("TOP-SECRET"));
+    }
+
+    #[test]
+    fn load_enforces_the_size_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let padded =
+            |len: u64| format!("{MINIMAL}#{}", "x".repeat(len as usize - MINIMAL.len() - 1));
+
+        std::fs::write(&path, padded(MAX_FILE_BYTES)).unwrap();
+        assert!(Config::load(dir.path()).is_ok());
+        std::fs::write(&path, padded(MAX_FILE_BYTES + 1)).unwrap();
+        assert!(matches!(
+            Config::load(dir.path()),
+            Err(ConfigError::TooLarge { .. })
+        ));
     }
 }
