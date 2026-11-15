@@ -1,0 +1,17 @@
+# Every key shown here is optional except `schema` and `[project] name`;
+# the values below are the defaults (see README.md for the full schema).
+schema = 1
+
+[project]
+name = "team-agents-kit"
+
+[paths]
+agents = "agents"
+skills = "skills"
+rules = "rules"
+
+[targets.claude]
+enabled = true
+
+# Allowed (model, effort) pairs are defined later; the table is accepted but empty.
+[policy.models.claude]
