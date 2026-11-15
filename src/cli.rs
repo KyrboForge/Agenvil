@@ -2,10 +2,12 @@
 
 use std::path::{Path, PathBuf};
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::config::{Config, ConfigError};
 use crate::diagnostics::Exit;
+use crate::discovery::{Limits, OverlapError};
+use crate::inventory::Inventory;
 
 #[derive(Debug, Parser)]
 #[command(name = "agenvil", version, about)]
@@ -23,7 +25,10 @@ pub enum Command {
     /// Validate the source tree (read-only, offline)
     Check,
     /// List the discovered source resources (read-only, offline)
-    Inventory,
+    Inventory {
+        #[arg(long, value_enum, default_value_t = Format::Json)]
+        format: Format,
+    },
     /// List the validation rules (read-only)
     Rules,
     /// Explain one finding ID (read-only)
@@ -35,11 +40,16 @@ pub enum Command {
     Build,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum Format {
+    Json,
+}
+
 impl Command {
     fn name(&self) -> &'static str {
         match self {
             Self::Check => "check",
-            Self::Inventory => "inventory",
+            Self::Inventory { .. } => "inventory",
             Self::Rules => "rules",
             Self::Explain { .. } => "explain",
             Self::Build => "build",
@@ -53,13 +63,21 @@ enum Error {
     Config(#[from] ConfigError),
     #[error("`agenvil {0}` is not implemented yet, so nothing was verified")]
     NotImplemented(&'static str),
+    #[error(transparent)]
+    Overlap(#[from] OverlapError),
+    #[error("could not serialize the inventory: {0}")]
+    Serialize(#[from] serde_json::Error),
+    /// The inventory was printed, but problems mean it is incomplete.
+    #[error("{0} problem(s) found; the inventory above is incomplete")]
+    Incomplete(usize),
 }
 
 impl Error {
     fn exit(&self) -> Exit {
         match self {
-            Self::Config(_) => Exit::Usage,
-            Self::NotImplemented(_) => Exit::Unverifiable,
+            Self::Config(_) | Self::Overlap(_) => Exit::Usage,
+            Self::NotImplemented(_) | Self::Incomplete(_) => Exit::Unverifiable,
+            Self::Serialize(_) => Exit::Internal,
         }
     }
 }
@@ -78,9 +96,22 @@ pub fn run(cli: &Cli) -> Exit {
 fn execute(cli: &Cli) -> Result<(), Error> {
     let root = cli.root.as_deref().unwrap_or(Path::new("."));
     // Load first so a broken config is never mistaken for a clean or merely unimplemented run.
-    Config::load(root)?;
-    // No command is implemented yet; none may claim success.
-    Err(Error::NotImplemented(cli.command.name()))
+    let config = Config::load(root)?;
+    match &cli.command {
+        Command::Inventory {
+            format: Format::Json,
+        } => {
+            let inventory = Inventory::build(root, &config, &Limits::default())?;
+            print!("{}", inventory.to_json()?);
+            // Problems are untrusted-input failures, not policy findings, so this is "no verdict".
+            match inventory.problems.len() {
+                0 => Ok(()),
+                n => Err(Error::Incomplete(n)),
+            }
+        }
+        // Not implemented yet; none may claim success.
+        command => Err(Error::NotImplemented(command.name())),
+    }
 }
 
 #[cfg(test)]

@@ -140,7 +140,10 @@ impl TryFrom<String> for RelPath {
                 "path `{value}` must be non-empty, use `/` separators, be relative to the project root and stay inside it"
             ));
         }
-        Ok(Self(PathBuf::from(value)))
+        // `./agents//` and `agents` are the same directory; discovery compares components.
+        Ok(Self(
+            segments().filter(|s| !s.is_empty() && *s != ".").collect(),
+        ))
     }
 }
 
@@ -275,6 +278,12 @@ mod tests {
     fn project_name_is_required() {
         assert!(err("schema = 1\n").contains("missing field `project`"));
         assert!(err("schema = 1\n[project]\n").contains("missing field `name`"));
+    }
+
+    #[test]
+    fn paths_drop_dot_and_empty_segments() {
+        let cfg = parse(&format!("{MINIMAL}[paths]\nagents = \"./a//b/./\"\n")).unwrap();
+        assert_eq!(cfg.paths.agents.as_path(), Path::new("a/b"));
     }
 
     #[test]
