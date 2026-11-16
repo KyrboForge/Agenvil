@@ -26,9 +26,10 @@ Deferred to the compatibility suite (#8), all `Check::Deferred` in the catalog: 
 CF002, CF003, CF004, CN001, FM001, HY003, HY005, SK003–SK006, ST001, ST002, TL001, TL002, TP001,
 WF001.
 
-**A deferred rule is never a pass.** A normal run lists the deferred rules it did not check on
-stderr (`not checked (not implemented): …`; hidden by `--quiet`). Naming one with `--only` exits
-`4`.
+**A deferred rule is never a pass.** Any selected deferred rule, including those in the default
+selection, makes the run exit `4` and names them on stderr (`cannot verify …: not implemented`,
+shown even with `--quiet`). To check only the implemented rules, opt out explicitly: pass
+`--skip` with the listed IDs, or set them to `"off"` under `[rules]`.
 
 ## Output
 
@@ -44,7 +45,7 @@ order and nothing else:
 
 `--format github` prints one `::error`/`::warning` annotation per finding; `--format human` prints
 `path:line:col: severity[ID] message` plus a `fix:` line and a summary. `--quiet` drops the fix
-lines, the summary and the "not checked" note from the human format.
+lines and the summary from the human format.
 
 ## Exit codes and precedence
 
@@ -58,7 +59,7 @@ lines, the summary and the "not checked" note from the human format.
 
 Exit `4` wins over `1`. It means a selected rule could not read its input: malformed frontmatter,
 a symlink, an oversized or non-UTF-8 file, an unreadable directory, a missing `POLICY.md` while
-agents exist, or a deferred rule named with `--only`. Findings found so far are still printed, but
+agents exist, or a selected deferred rule. Findings found so far are still printed, but
 a parse failure is never reported as a policy finding. Problems go to stderr, findings to stdout.
 
 ## Selection and severity

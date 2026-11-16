@@ -146,20 +146,21 @@ fn root_is_cwd_by_default_or_explicit_from_anywhere() {
     let elsewhere = tempfile::tempdir().unwrap();
     // cwd without a config: error, even though another directory has one.
     agenvil(&elsewhere).arg("check").assert().code(2);
-    // explicit root, run from outside the project.
+    // explicit root, run from outside the project. Exit 4, not 2: the config was found, but the
+    // default selection includes deferred rules.
     agenvil(&elsewhere)
         .args(["check", "--root"])
         .arg(proj.path())
         .assert()
-        .code(0);
+        .code(4);
     agenvil(&elsewhere)
         .arg("--root")
         .arg(proj.path())
         .arg("check")
         .assert()
-        .code(0);
+        .code(4);
     // default root is the working directory.
-    agenvil(&proj).arg("check").assert().code(0);
+    agenvil(&proj).arg("check").assert().code(4);
 }
 
 #[test]
@@ -167,12 +168,8 @@ fn commands_leave_the_project_untouched() {
     let dir = project(VALID);
     let before = entries(&dir);
     agenvil(&dir).arg("build").assert().code(4);
-    for args in [
-        &["check"][..],
-        &["inventory"],
-        &["rules"],
-        &["explain", "AG001"],
-    ] {
+    agenvil(&dir).arg("check").assert().code(4);
+    for args in [&["inventory"][..], &["rules"], &["explain", "AG001"]] {
         agenvil(&dir).args(args).assert().code(0);
     }
     assert_eq!(entries(&dir), before);

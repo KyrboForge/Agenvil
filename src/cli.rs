@@ -120,8 +120,13 @@ enum Error {
     /// Output was printed, but problems mean it is incomplete.
     #[error("{0} problem(s) found; the result above is incomplete")]
     Incomplete(usize),
-    /// Rules the user asked for by name that have no implementation.
-    #[error("cannot verify {}: not implemented (see `agenvil explain <ID>`)", .0.join(", "))]
+    /// Selected rules that have no implementation.
+    #[error(
+        "cannot verify {}: not implemented, so the result is incomplete; to check only the \
+         implemented rules, pass `--skip {}` or set them to \"off\" under [rules] in agenvil.toml",
+        .0.join(", "),
+        .0.join(",")
+    )]
     Unavailable(Vec<&'static str>),
     /// Findings at or above the `--fail-on` threshold; already printed.
     #[error("{0} finding(s) at or above the `--fail-on` level")]
@@ -209,12 +214,6 @@ fn execute(cli: &Cli) -> Result<(), Error> {
                 CheckFormat::Github => print!("{}", report::github(findings)),
             }
             eprint!("{}", report::problems(&outcome.problems));
-            if !plan.not_checked.is_empty() && !quiet {
-                eprintln!(
-                    "note: not checked (not implemented): {}",
-                    plan.not_checked.join(", ")
-                );
-            }
             // No verdict beats any finding: an incomplete run must not look like a clean or a
             // merely failing one.
             if !plan.unavailable.is_empty() {
@@ -296,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn config_errors_exit_usage_and_valid_config_checks_clean() {
+    fn config_errors_exit_usage_and_deferred_rules_exit_unverifiable() {
         let dir = tempfile::tempdir().unwrap();
         let cli = Cli::parse_from(["agenvil", "--root", dir.path().to_str().unwrap(), "check"]);
         assert_eq!(run(&cli), Exit::Usage);
@@ -306,6 +305,7 @@ mod tests {
             "schema = 1\n[project]\nname = \"x\"\n",
         )
         .unwrap();
-        assert_eq!(run(&cli), Exit::Success);
+        // The default selection includes deferred rules, so the verdict is incomplete.
+        assert_eq!(run(&cli), Exit::Unverifiable);
     }
 }

@@ -90,9 +90,8 @@ pub struct Options<'a> {
 /// The rules to run, resolved and validated.
 pub struct Plan {
     pub rules: Vec<(&'static Rule, Severity)>,
-    /// Deferred rules that would have run: reported so they are never mistaken for passing.
-    pub not_checked: Vec<&'static str>,
-    /// Deferred rules the user asked for by name; there is no way to give a verdict on them.
+    /// Selected rules without an implementation. Any of them makes the verdict incomplete, so
+    /// they are never mistaken for passing.
     pub unavailable: Vec<&'static str>,
 }
 
@@ -145,7 +144,6 @@ impl Plan {
 
         let mut plan = Self {
             rules: Vec::new(),
-            not_checked: Vec::new(),
             unavailable: Vec::new(),
         };
         for rule in CATALOG {
@@ -168,8 +166,7 @@ impl Plan {
             };
             match rule.check {
                 Check::Run(_) => plan.rules.push((rule, severity)),
-                Check::Deferred(_) if named => plan.unavailable.push(rule.id),
-                Check::Deferred(_) => plan.not_checked.push(rule.id),
+                Check::Deferred(_) => plan.unavailable.push(rule.id),
             }
         }
         Ok(plan)

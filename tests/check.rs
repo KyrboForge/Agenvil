@@ -55,13 +55,32 @@ fn make_executable(dir: &TempDir, path: &str) {
 #[cfg(not(unix))]
 fn make_executable(_: &TempDir, _: &str) {}
 
-/// Runs `check --format json` with `args`, returning the exit code and parsed stdout.
-fn check(dir: &TempDir, args: &[&str]) -> (i32, Value) {
-    let output = agenvil(dir)
-        .args(["check", "--format", "json"])
-        .args(args)
+/// The deferred rule IDs, comma-separated, as `agenvil rules` lists them.
+fn deferred() -> String {
+    let output = Command::cargo_bin("agenvil")
+        .unwrap()
+        .arg("rules")
         .output()
         .unwrap();
+    let ids: Vec<_> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .filter(|l| l.contains(" deferred "))
+        .map(|l| l.split_whitespace().next().unwrap().to_owned())
+        .collect();
+    assert!(!ids.is_empty());
+    ids.join(",")
+}
+
+/// Runs `check --format json` with `args` over the implemented rules (deferred rules are skipped
+/// unless `args` has `--only`), returning the exit code and parsed stdout.
+fn check(dir: &TempDir, args: &[&str]) -> (i32, Value) {
+    let mut cmd = agenvil(dir);
+    cmd.args(["check", "--format", "json"]).args(args);
+    if !args.contains(&"--only") {
+        cmd.args(["--skip", &deferred()]);
+    }
+    let output = cmd.output().unwrap();
     let code = output.status.code().unwrap();
     let json = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
         panic!(
@@ -113,11 +132,46 @@ fn clean_project_passes_with_the_documented_json() {
         json!({"schema": 1, "findings": [], "summary": {"errors": 0, "warnings": 0}})
     );
     agenvil(&dir)
-        .arg("check")
+        .args(["check", "--skip", &deferred()])
         .assert()
         .code(0)
+        .stdout(predicate::str::contains("0 error(s), 0 warning(s)"));
+}
+
+#[test]
+fn default_check_cannot_verify_deferred_rules() {
+    let dir = clean();
+    let skip = format!("--skip {}", deferred());
+    let not_verified = || {
+        predicate::str::contains("cannot verify AG006, AG007,")
+            .and(predicate::str::contains("not implemented"))
+            .and(predicate::str::contains(skip.clone()))
+    };
+    agenvil(&dir)
+        .arg("check")
+        .assert()
+        .code(4)
         .stdout(predicate::str::contains("0 error(s), 0 warning(s)"))
-        .stderr(predicate::str::contains("not checked (not implemented)"));
+        .stderr(not_verified());
+    // `--quiet` must not hide why the verdict is incomplete.
+    let out = agenvil(&dir)
+        .args(["check", "--quiet", "--format", "json"])
+        .assert()
+        .code(4)
+        .stderr(not_verified())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(json["findings"], json!([]));
+
+    // Turning the deferred rules off in the config is the other way to an implemented-only run.
+    let off: String = deferred()
+        .split(',')
+        .map(|id| format!("{id} = \"off\"\n"))
+        .collect();
+    write(&dir, "agenvil.toml", format!("{CONFIG}[rules]\n{off}"));
+    agenvil(&dir).arg("check").assert().code(0);
 }
 
 #[test]
@@ -407,6 +461,32 @@ fn po001_flags_a_broken_table() {
 }
 
 #[test]
+fn po001_separator_needs_one_cell_per_column() {
+    let dir = clean();
+    for (separator, ok) in [
+        ("|---|", false),
+        ("|---|---|", false),
+        ("|:---|---:|:-:|", true),
+        ("|---|---|---|---|", false),
+    ] {
+        write(
+            &dir,
+            "POLICY.md",
+            POLICY.replace("|---|---|---|", separator),
+        );
+        let (code, json) = check(&dir, &["--only", "PO001"]);
+        assert_eq!(code, if ok { 0 } else { 1 }, "{separator}: {json}");
+        if !ok {
+            // Reported at the header the separator belongs to.
+            assert!(
+                found(&json).iter().any(|f| f.2 == Some(3)),
+                "{separator}: {json}"
+            );
+        }
+    }
+}
+
+#[test]
 fn po001_accepts_crlf_and_a_bom() {
     let dir = clean();
     write(
@@ -427,10 +507,7 @@ fn po001_missing_policy_with_agents_cannot_be_verified() {
         .code(4)
         .stderr(predicate::str::contains("POLICY.md").and(predicate::str::contains("missing")));
     // Skipping the rule is the documented way out; so is having no agents at all.
-    agenvil(&dir)
-        .args(["check", "--skip", "PO001"])
-        .assert()
-        .code(0);
+    assert_eq!(check(&dir, &["--skip", "PO001"]).0, 0);
     fs::remove_file(dir.path().join("agents/reviewer.md")).unwrap();
     agenvil(&dir)
         .args(["check", "--only", "PO001"])
@@ -752,7 +829,7 @@ fn config_path_override() {
         .arg(dir.path())
         .arg("--config")
         .arg(other.path().join("custom.toml"))
-        .arg("check")
+        .args(["check", "--skip", &deferred()])
         .assert()
         .code(0);
     agenvil(&other)
@@ -831,11 +908,11 @@ fn deferred_rules_are_never_reported_as_passing() {
             .code(4)
             .stderr(predicate::str::contains(id).and(predicate::str::contains("not implemented")));
     }
-    // Part of a normal run: listed on stderr, never silently counted as passing.
+    // Part of a normal run: still no verdict, never silently counted as passing.
     agenvil(&dir)
         .arg("check")
         .assert()
-        .code(0)
+        .code(4)
         .stderr(predicate::str::contains("AG006").and(predicate::str::contains("SK003")));
 }
 
@@ -863,8 +940,8 @@ fn fast_excludes_sk002_and_cf003_and_rejects_naming_them() {
     agenvil(&dir)
         .args(["check", "--fast"])
         .assert()
-        .code(0)
-        .stderr(predicate::str::contains("CF003").not());
+        .code(4)
+        .stderr(predicate::str::contains("CF002").and(predicate::str::contains("CF003").not()));
 }
 
 fn snapshot(dir: &TempDir) -> Vec<(String, Vec<u8>)> {
@@ -901,6 +978,7 @@ fn check_is_read_only_offline_and_does_not_run_repo_scripts() {
     make_executable(&dir, "bin/evil");
     write(&dir, ".git/hooks/pre-commit", "#!/bin/sh\ntouch executed\n");
     let before = snapshot(&dir);
+    let deferred = deferred();
     for args in [
         &["check", "--fast"][..],
         &["check"],
@@ -911,6 +989,7 @@ fn check_is_read_only_offline_and_does_not_run_repo_scripts() {
             .env("HTTPS_PROXY", "http://127.0.0.1:1")
             .env("HTTP_PROXY", "http://127.0.0.1:1")
             .args(args)
+            .args(["--skip", &deferred])
             .assert()
             .code(0);
     }
@@ -987,7 +1066,7 @@ fn human_format_and_quiet() {
     let quiet = String::from_utf8(quiet).unwrap();
     assert_eq!(quiet.lines().count(), 1, "{quiet}");
     agenvil(&clean())
-        .args(["check", "--quiet"])
+        .args(["check", "--quiet", "--skip", &deferred()])
         .assert()
         .code(0)
         .stdout("")

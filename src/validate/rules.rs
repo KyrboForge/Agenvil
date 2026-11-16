@@ -523,10 +523,11 @@ fn cells(line: &str) -> Vec<&str> {
 }
 
 fn is_separator(cells: &[&str]) -> bool {
-    cells.iter().all(|c| {
-        let c = c.trim_matches(':');
-        !c.is_empty() && c.bytes().all(|b| b == b'-')
-    })
+    cells.len() == 3
+        && cells.iter().all(|c| {
+            let c = c.trim_matches(':');
+            !c.is_empty() && c.bytes().all(|b| b == b'-')
+        })
 }
 
 /// Column of the first non-blank character, in characters.

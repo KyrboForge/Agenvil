@@ -117,8 +117,9 @@ Runs the [rules](docs/rules.md) over the inventory and prints findings (`id`, `s
 `line`, `column`, `message`, `fix`) in a deterministic order. `--format json` prints
 `{"schema":1,"findings":[…],"summary":{"errors":0,"warnings":0}}`; `github` prints workflow
 annotations. Input problems (malformed frontmatter, symlinks, size limits, a missing `POLICY.md`)
-go to stderr and exit `4`: they are never reported as policy violations or as a pass. Rules that
-are not implemented yet are listed on stderr as "not checked".
+go to stderr and exit `4`: they are never reported as policy violations or as a pass. So does
+selecting a rule that is not implemented yet, which the default selection does; pass `--skip` with
+the listed IDs (or set them to `"off"` under `[rules]`) to check only the implemented rules.
 
 `--fast` is offline: no subprocess, no network, no writes, and no script from the tree is ever
 executed. It excludes SK002 and the (deferred) CF003, which needs git. `check` never modifies the
