@@ -1,0 +1,8 @@
+[update]
+auto_update = "daily"
+[hooks]
+update = true
+[headroom]
+port = 8787
+[bogus]
+x = 1

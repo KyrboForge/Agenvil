@@ -1,0 +1,9 @@
+description = "a bin script without a shebang"
+exit = 1
+
+[[findings]]
+id = "HY002"
+severity = "error"
+path = "bin/tool"
+line = 1
+column = 1

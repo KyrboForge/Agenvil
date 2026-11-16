@@ -1,0 +1,10 @@
+description = "skill name differs from its directory"
+exit = 1
+golden = ["json", "github", "human"]
+
+[[findings]]
+id = "SK001"
+severity = "error"
+path = "skills/tdd/SKILL.md"
+line = 2
+column = 1

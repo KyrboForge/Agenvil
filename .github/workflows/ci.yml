@@ -43,7 +43,28 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked --all-targets
+      # Already part of the run above; named so a golden or compatibility failure is visible on
+      # its own. Both compare against committed Agenvil baselines, not the legacy shell, and
+      # snapshots can only be rewritten locally (AGENVIL_BLESS is refused when CI is set).
+      - name: Golden snapshots (committed baselines)
+        run: cargo test --locked --test golden
+      - name: Fixture compatibility suite and matrix check (no legacy oracle in CI)
+        run: cargo test --locked --test compatibility
       - run: cargo build --locked
+
+  audit:
+    name: audit (dependencies)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
+        with:
+          tool: cargo-audit@0.22.2
+      # Reads the public RustSec advisory database; needs no token. Fails on any advisory.
+      - run: cargo audit --deny warnings
 
   msrv:
     name: msrv (ubuntu-latest)

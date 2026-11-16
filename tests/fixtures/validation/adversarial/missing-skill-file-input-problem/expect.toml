@@ -1,0 +1,4 @@
+description = "with SK001 skipped a skill directory without SKILL.md is an input problem"
+exit = 4
+args = ["--skip", "SK001"]
+stderr_contains = ["missing-skill-file"]

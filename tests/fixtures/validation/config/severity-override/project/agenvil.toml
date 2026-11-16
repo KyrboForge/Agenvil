@@ -1,0 +1,6 @@
+schema = 1
+[project]
+name = "demo"
+[rules]
+AG002 = "warning"
+AG004 = "warning"

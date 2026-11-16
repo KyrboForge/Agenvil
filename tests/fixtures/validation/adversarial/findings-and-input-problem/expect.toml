@@ -1,0 +1,18 @@
+description = "findings are still printed when an input problem makes the verdict incomplete"
+exit = 4
+golden = ["json", "stderr"]
+stderr_contains = ["agents/broken.md"]
+
+[[findings]]
+id = "AG002"
+severity = "error"
+path = "agents/reviewer.md"
+line = 4
+column = 1
+
+[[findings]]
+id = "AG004"
+severity = "error"
+path = "agents/reviewer.md"
+line = 5
+column = 1

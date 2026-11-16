@@ -1,0 +1,17 @@
+description = "workflow-command escaping of % and , in paths and messages"
+exit = 1
+golden = ["github", "json"]
+
+[[findings]]
+id = "AG002"
+severity = "error"
+path = "agents/50%,odd.md"
+line = 4
+column = 1
+
+[[findings]]
+id = "AG004"
+severity = "error"
+path = "agents/50%,odd.md"
+line = 5
+column = 1

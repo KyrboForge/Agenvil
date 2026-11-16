@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "findings": [
+    {
+      "id": "SK002",
+      "severity": "warning",
+      "path": "skills/tdd/SKILL.md",
+      "line": null,
+      "column": null,
+      "message": "`effort` is not set; set it or write `effort: inherit`",
+      "fix": "Add `model` and `effort`, or set each to `inherit`."
+    },
+    {
+      "id": "SK002",
+      "severity": "warning",
+      "path": "skills/tdd/SKILL.md",
+      "line": null,
+      "column": null,
+      "message": "`model` is not set; set it or write `model: inherit`",
+      "fix": "Add `model` and `effort`, or set each to `inherit`."
+    }
+  ],
+  "summary": {
+    "errors": 0,
+    "warnings": 2
+  }
+}

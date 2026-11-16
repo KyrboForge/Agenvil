@@ -1,0 +1,11 @@
+description = "more than 10 000 directory entries"
+exit = 4
+setup = "many-entries"
+stderr_contains = ["limit-exceeded"]
+
+[[findings]]
+id = "PO001"
+severity = "error"
+path = "POLICY.md"
+line = 5
+column = 1

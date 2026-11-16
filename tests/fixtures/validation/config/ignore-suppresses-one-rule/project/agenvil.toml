@@ -1,0 +1,7 @@
+schema = 1
+[project]
+name = "demo"
+[[ignore]]
+rule = "AG002"
+path = "agents/reviewer.md"
+reason = "pinned vendor model"

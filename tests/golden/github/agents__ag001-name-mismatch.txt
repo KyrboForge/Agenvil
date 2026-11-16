@@ -1,0 +1,1 @@
+::error file=agents/reviewer.md,line=2,col=1,title=AG001::`name` must equal the file name `reviewer` (fix: Add the missing keys and set `name` to the file name without `.md`.)

@@ -1,0 +1,2 @@
+::warning file=skills/tdd/SKILL.md,title=SK002::`effort` is not set; set it or write `effort: inherit` (fix: Add `model` and `effort`, or set each to `inherit`.)
+::warning file=skills/tdd/SKILL.md,title=SK002::`model` is not set; set it or write `model: inherit` (fix: Add `model` and `effort`, or set each to `inherit`.)

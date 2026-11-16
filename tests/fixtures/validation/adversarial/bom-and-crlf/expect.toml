@@ -1,0 +1,2 @@
+description = "a BOM and CRLF line endings are accepted"
+exit = 0

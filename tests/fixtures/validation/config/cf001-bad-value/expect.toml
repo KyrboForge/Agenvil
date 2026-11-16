@@ -1,0 +1,9 @@
+description = "defaults.toml has an invalid value"
+exit = 1
+
+[[findings]]
+id = "CF001"
+severity = "error"
+path = "config/defaults.toml"
+line = 2
+column = 15

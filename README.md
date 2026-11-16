@@ -168,7 +168,8 @@ third-party actions to commit SHAs. Pull requests only restore the Cargo cache; 
 
 | Job | Runs on | Commands |
 | --- | --- | --- |
-| `test` | Ubuntu, macOS, Windows (stable Rust) | `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets -- -D warnings`, `cargo test --locked --all-targets`, `cargo build --locked` |
+| `test` | Ubuntu, macOS, Windows (stable Rust) | `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets -- -D warnings`, `cargo test --locked --all-targets` (includes the golden and fixture compatibility suites, also run as named steps), `cargo build --locked` |
+| `audit` | Ubuntu | `cargo audit --deny warnings` (cargo-audit 0.22.2, public RustSec database) |
 | `msrv` | Ubuntu, Rust from `rust-version` in `Cargo.toml` | `cargo build --locked`, `cargo test --locked --all-targets` |
 
 Run the same checks locally (`--locked` fails if `Cargo.lock` is out of date). Tests use temporary
@@ -181,3 +182,26 @@ cargo test --locked --all-targets
 cargo build --locked
 cargo +1.89 test --locked --all-targets   # MSRV; needs `rustup toolchain install 1.89`
 ```
+
+### Testing and compatibility
+
+Validation behaviour is pinned by fixtures: `tests/fixtures/validation/<category>/<name>/` holds a
+`project/` tree and an `expect.toml` (exit code, every finding with its location, stderr
+expectations). `tests/golden/` holds byte-exact snapshots of `check --format json|github|human`
+and the stderr summary, and `tests/golden/coverage.md` reports fixture and rule coverage.
+
+```sh
+cargo test --test compatibility   # fixtures, rule matrix and coverage report checks
+cargo test --test golden          # committed output snapshots
+AGENVIL_BLESS=1 cargo test --test golden --test compatibility   # rewrite snapshots, then review the diff
+```
+
+Blessing is refused when `CI` is set, so a changed snapshot always arrives as a reviewed diff.
+Fixtures run in a copy of the tree with an empty HOME, and the tests assert that nothing was
+written, no repository script ran and the real HOME was never read.
+
+**These baselines are Agenvil's own, not the legacy shell validator's.** The shell was not
+available, so [`docs/compatibility.md`](docs/compatibility.md) lists every rule with its parity
+status (none `verified`), the known differences awaiting approval and the proposed follow-ups.
+A green run means the implemented rules behave as the fixtures say; 19 of 30 rules are still
+deferred, and the default `check` exits `4` until they are implemented or skipped.

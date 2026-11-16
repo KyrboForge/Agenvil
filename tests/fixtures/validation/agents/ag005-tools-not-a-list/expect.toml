@@ -1,0 +1,9 @@
+description = "tools is a string, not a list"
+exit = 1
+
+[[findings]]
+id = "AG005"
+severity = "error"
+path = "agents/reviewer.md"
+line = 6
+column = 1

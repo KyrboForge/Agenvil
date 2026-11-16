@@ -1,0 +1,2 @@
+description = "shell-looking content and bin scripts are never executed"
+exit = 0

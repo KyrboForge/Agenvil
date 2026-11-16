@@ -1,0 +1,83 @@
+description = "several rules fire across files and are sorted by path, line and ID"
+exit = 1
+golden = ["json", "github", "human"]
+
+[[findings]]
+id = "PO001"
+severity = "error"
+path = "POLICY.md"
+line = 2
+column = 1
+
+[[findings]]
+id = "PO001"
+severity = "error"
+path = "POLICY.md"
+line = 5
+column = 1
+
+[[findings]]
+id = "AG001"
+severity = "error"
+path = "agents/alpha.md"
+line = 2
+column = 1
+
+[[findings]]
+id = "AG003"
+severity = "error"
+path = "agents/alpha.md"
+line = 5
+column = 1
+
+[[findings]]
+id = "AG004"
+severity = "error"
+path = "agents/alpha.md"
+line = 5
+column = 1
+
+[[findings]]
+id = "AG002"
+severity = "error"
+path = "agents/zeta.md"
+line = 4
+column = 1
+
+[[findings]]
+id = "AG004"
+severity = "error"
+path = "agents/zeta.md"
+line = 5
+column = 1
+
+[[findings]]
+id = "HY002"
+severity = "error"
+path = "bin/tool"
+line = 1
+column = 1
+
+[[findings]]
+id = "SK002"
+severity = "warning"
+path = "skills/tdd/SKILL.md"
+
+[[findings]]
+id = "SK002"
+severity = "warning"
+path = "skills/tdd/SKILL.md"
+
+[[findings]]
+id = "SK001"
+severity = "error"
+path = "skills/tdd/SKILL.md"
+line = 2
+column = 1
+
+[[findings]]
+id = "SK001"
+severity = "error"
+path = "skills/tdd/SKILL.md"
+line = 3
+column = 1

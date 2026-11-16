@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "findings": [
+    {
+      "id": "PO001",
+      "severity": "error",
+      "path": "POLICY.md",
+      "line": 5,
+      "column": 1,
+      "message": "row for `reviewer` says `sonnet` / `high` but agents/reviewer.md sets `opus` / `high`",
+      "fix": "Regenerate or correct the table so each agent has exactly one matching row."
+    }
+  ],
+  "summary": {
+    "errors": 1,
+    "warnings": 0
+  }
+}

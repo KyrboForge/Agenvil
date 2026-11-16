@@ -1,0 +1,7 @@
+description = "tools key is missing"
+exit = 1
+
+[[findings]]
+id = "AG001"
+severity = "error"
+path = "agents/reviewer.md"

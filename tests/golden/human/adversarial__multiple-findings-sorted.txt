@@ -1,0 +1,25 @@
+POLICY.md:2:1: error[PO001] agent `zeta` has no row in the model table
+    fix: Regenerate or correct the table so each agent has exactly one matching row.
+POLICY.md:5:1: error[PO001] row for `alpha` says `opus` / `high` but agents/alpha.md sets `opus` / `max`
+    fix: Regenerate or correct the table so each agent has exactly one matching row.
+agents/alpha.md:2:1: error[AG001] `name` must equal the file name `alpha`
+    fix: Add the missing keys and set `name` to the file name without `.md`.
+agents/alpha.md:5:1: error[AG003] `effort: "max"` is not allowed; allowed: `low`, `medium`, `high`, `xhigh`
+    fix: Use an allowed effort, or extend [policy.models.claude].efforts in agenvil.toml.
+agents/alpha.md:5:1: error[AG004] `model: opus` with `effort: max` is not an allowed pair; allowed: `haiku+low`, `sonnet+medium`, `sonnet+high`, `opus+high`, `opus+xhigh`
+    fix: Choose an allowed pair, or add the pair to [policy.models.claude].pairs.
+agents/zeta.md:4:1: error[AG002] `model: "gpt-4"` is not allowed; allowed: `haiku`, `sonnet`, `opus`
+    fix: Use an allowed model, or extend [policy.models.claude].models in agenvil.toml.
+agents/zeta.md:5:1: error[AG004] `model: gpt-4` with `effort: high` is not an allowed pair; allowed: `haiku+low`, `sonnet+medium`, `sonnet+high`, `opus+high`, `opus+xhigh`
+    fix: Choose an allowed pair, or add the pair to [policy.models.claude].pairs.
+bin/tool:1:1: error[HY002] file does not start with a shebang (`#!`)
+    fix: Add a shebang line and `chmod +x` the file.
+skills/tdd/SKILL.md: warning[SK002] `effort` is not set; set it or write `effort: inherit`
+    fix: Add `model` and `effort`, or set each to `inherit`.
+skills/tdd/SKILL.md: warning[SK002] `model` is not set; set it or write `model: inherit`
+    fix: Add `model` and `effort`, or set each to `inherit`.
+skills/tdd/SKILL.md:2:1: error[SK001] `name` must equal the folder name `tdd`
+    fix: Add SKILL.md with `name` equal to the folder name and a non-empty `description`.
+skills/tdd/SKILL.md:3:1: error[SK001] `description` must not be empty
+    fix: Add SKILL.md with `name` equal to the folder name and a non-empty `description`.
+10 error(s), 2 warning(s)

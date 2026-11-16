@@ -1,0 +1,8 @@
+description = "a bin script without the executable bit (Unix)"
+exit = 1
+platform = "unix"
+
+[[findings]]
+id = "HY002"
+severity = "error"
+path = "bin/tool"

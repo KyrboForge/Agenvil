@@ -1,0 +1,7 @@
+description = "a skill directory without SKILL.md"
+exit = 1
+
+[[findings]]
+id = "SK001"
+severity = "error"
+path = "skills/tdd"

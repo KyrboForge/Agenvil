@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "findings": [
+    {
+      "id": "SK001",
+      "severity": "error",
+      "path": "skills/tdd/SKILL.md",
+      "line": 2,
+      "column": 1,
+      "message": "`name` must equal the folder name `tdd`",
+      "fix": "Add SKILL.md with `name` equal to the folder name and a non-empty `description`."
+    }
+  ],
+  "summary": {
+    "errors": 1,
+    "warnings": 0
+  }
+}

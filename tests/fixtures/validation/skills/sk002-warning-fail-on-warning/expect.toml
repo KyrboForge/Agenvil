@@ -1,0 +1,13 @@
+description = "a warning fails the run with --fail-on warning"
+exit = 1
+args = ["--fail-on", "warning"]
+
+[[findings]]
+id = "SK002"
+severity = "warning"
+path = "skills/tdd/SKILL.md"
+
+[[findings]]
+id = "SK002"
+severity = "warning"
+path = "skills/tdd/SKILL.md"

@@ -1,0 +1,9 @@
+description = "allowed model and effort that do not form an allowed pair"
+exit = 1
+
+[[findings]]
+id = "AG004"
+severity = "error"
+path = "agents/reviewer.md"
+line = 5
+column = 1

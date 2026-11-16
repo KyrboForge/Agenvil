@@ -1,0 +1,6 @@
+description = "a symlink out of the project is never read"
+exit = 4
+platform = "unix"
+setup = "symlink-escape"
+stderr_contains = ["symlink"]
+stderr_excludes = ["outside"]

@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "findings": [
+    {
+      "id": "AG001",
+      "severity": "error",
+      "path": "agents/reviewer.md",
+      "line": 2,
+      "column": 1,
+      "message": "`name` must equal the file name `reviewer`",
+      "fix": "Add the missing keys and set `name` to the file name without `.md`."
+    }
+  ],
+  "summary": {
+    "errors": 1,
+    "warnings": 0
+  }
+}

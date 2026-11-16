@@ -1,0 +1,10 @@
+description = "name differs from the file name"
+exit = 1
+golden = ["json", "github", "human"]
+
+[[findings]]
+id = "AG001"
+severity = "error"
+path = "agents/reviewer.md"
+line = 2
+column = 1

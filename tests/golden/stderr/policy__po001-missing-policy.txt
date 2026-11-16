@@ -1,0 +1,2 @@
+problem: POLICY.md: missing: PO001 needs the policy file to compare with the agents; create it or skip PO001
+error: 1 problem(s) found; the result above is incomplete

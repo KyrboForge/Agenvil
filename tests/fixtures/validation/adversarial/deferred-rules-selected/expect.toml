@@ -1,0 +1,5 @@
+description = "deferred rules stay selected: the verdict is incomplete, never a pass"
+exit = 4
+deferred = "select"
+golden = ["json", "stderr"]
+stderr_contains = ["cannot verify AG006", "not implemented"]

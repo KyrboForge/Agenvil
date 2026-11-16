@@ -1,0 +1,4 @@
+description = "a file over 1 MiB is an input problem"
+exit = 4
+setup = "oversized-agent"
+stderr_contains = ["too-large"]

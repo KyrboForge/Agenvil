@@ -1,0 +1,3 @@
+description = "an [[ignore]] entry needs a reason"
+exit = 2
+stderr_contains = ["`reason` must not be empty"]
