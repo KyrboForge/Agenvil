@@ -1,0 +1,9 @@
+description = "defaults.toml is not TOML"
+exit = 1
+
+[[findings]]
+id = "CF001"
+severity = "error"
+path = "config/defaults.toml"
+line = 1
+column = 8

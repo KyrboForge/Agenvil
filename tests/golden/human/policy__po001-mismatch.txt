@@ -1,0 +1,3 @@
+POLICY.md:5:1: error[PO001] row for `reviewer` says `sonnet` / `high` but agents/reviewer.md sets `opus` / `high`
+    fix: Regenerate or correct the table so each agent has exactly one matching row.
+1 error(s), 0 warning(s)

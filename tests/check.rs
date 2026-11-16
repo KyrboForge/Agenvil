@@ -3,10 +3,12 @@
 
 use std::fs;
 
-use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::{Value, json};
 use tempfile::TempDir;
+
+mod common;
+use common::{agenvil, deferred, snapshot};
 
 const CONFIG: &str = "schema = 1\n[project]\nname = \"demo\"\n";
 const AGENT: &str = "---\nname: reviewer\ndescription: Reviews code\nmodel: opus\neffort: high\ntools: [Read, Grep]\n---\nBody\n";
@@ -15,16 +17,6 @@ const SKILL: &str =
 const POLICY: &str = "# Policy\n<!-- kit:model-table -->\n| agent | model | effort |\n|---|---|---|\n| reviewer | opus | high |\n<!-- /kit:model-table -->\n";
 const DEFAULTS: &str =
     "[update]\nauto_update = \"daily\"\n[hooks]\nupdate = true\n[headroom]\nport = 8787\n";
-
-fn agenvil(dir: &TempDir) -> Command {
-    let mut cmd = Command::cargo_bin("agenvil").unwrap();
-    // Nothing may depend on the developer's machine.
-    cmd.current_dir(dir.path())
-        .env("HOME", dir.path())
-        .env("USERPROFILE", dir.path())
-        .env_remove("CLAUDE_CONFIG_DIR");
-    cmd
-}
 
 fn write(dir: &TempDir, path: &str, content: impl AsRef<[u8]>) {
     let full = dir.path().join(path);
@@ -54,23 +46,6 @@ fn make_executable(dir: &TempDir, path: &str) {
 
 #[cfg(not(unix))]
 fn make_executable(_: &TempDir, _: &str) {}
-
-/// The deferred rule IDs, comma-separated, as `agenvil rules` lists them.
-fn deferred() -> String {
-    let output = Command::cargo_bin("agenvil")
-        .unwrap()
-        .arg("rules")
-        .output()
-        .unwrap();
-    let ids: Vec<_> = String::from_utf8(output.stdout)
-        .unwrap()
-        .lines()
-        .filter(|l| l.contains(" deferred "))
-        .map(|l| l.split_whitespace().next().unwrap().to_owned())
-        .collect();
-    assert!(!ids.is_empty());
-    ids.join(",")
-}
 
 /// Runs `check --format json` with `args` over the implemented rules (deferred rules are skipped
 /// unless `args` has `--only`), returning the exit code and parsed stdout.
@@ -944,32 +919,6 @@ fn fast_excludes_sk002_and_cf003_and_rejects_naming_them() {
         .stderr(predicate::str::contains("CF002").and(predicate::str::contains("CF003").not()));
 }
 
-fn snapshot(dir: &TempDir) -> Vec<(String, Vec<u8>)> {
-    fn walk(base: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(String, Vec<u8>)>) {
-        let mut entries: Vec<_> = fs::read_dir(dir)
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .collect();
-        entries.sort();
-        for path in entries {
-            let rel = path
-                .strip_prefix(base)
-                .unwrap()
-                .to_string_lossy()
-                .replace('\\', "/");
-            if path.is_dir() {
-                out.push((format!("{rel}/"), Vec::new()));
-                walk(base, &path, out);
-            } else {
-                out.push((rel, fs::read(&path).unwrap()));
-            }
-        }
-    }
-    let mut out = Vec::new();
-    walk(dir.path(), dir.path(), &mut out);
-    out
-}
-
 #[test]
 fn check_is_read_only_offline_and_does_not_run_repo_scripts() {
     let dir = clean();
@@ -977,7 +926,7 @@ fn check_is_read_only_offline_and_does_not_run_repo_scripts() {
     write(&dir, "bin/evil", "#!/bin/sh\ntouch executed\n");
     make_executable(&dir, "bin/evil");
     write(&dir, ".git/hooks/pre-commit", "#!/bin/sh\ntouch executed\n");
-    let before = snapshot(&dir);
+    let before = snapshot(dir.path());
     let deferred = deferred();
     for args in [
         &["check", "--fast"][..],
@@ -993,7 +942,7 @@ fn check_is_read_only_offline_and_does_not_run_repo_scripts() {
             .assert()
             .code(0);
     }
-    assert_eq!(snapshot(&dir), before);
+    assert_eq!(snapshot(dir.path()), before);
     assert!(!dir.path().join("executed").exists());
 }
 
@@ -1065,7 +1014,7 @@ fn human_format_and_quiet() {
         .clone();
     let quiet = String::from_utf8(quiet).unwrap();
     assert_eq!(quiet.lines().count(), 1, "{quiet}");
-    agenvil(&clean())
+    agenvil(clean().path())
         .args(["check", "--quiet", "--skip", &deferred()])
         .assert()
         .code(0)

@@ -1,0 +1,3 @@
+description = "a non-UTF-8 agent is an input problem"
+exit = 4
+stderr_contains = ["invalid-utf8"]

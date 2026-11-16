@@ -1,0 +1,2 @@
+problem: agents/broken.md:2: frontmatter: invalid YAML frontmatter: unclosed bracket '[' at line 2, column 7
+error: 1 problem(s) found; the result above is incomplete

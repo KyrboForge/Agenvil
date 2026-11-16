@@ -1,0 +1,13 @@
+description = "a warning does not fail the default run"
+exit = 0
+golden = ["json", "github", "human"]
+
+[[findings]]
+id = "SK002"
+severity = "warning"
+path = "skills/tdd/SKILL.md"
+
+[[findings]]
+id = "SK002"
+severity = "warning"
+path = "skills/tdd/SKILL.md"

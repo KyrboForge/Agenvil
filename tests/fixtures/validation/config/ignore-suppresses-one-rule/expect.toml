@@ -1,0 +1,9 @@
+description = "[[ignore]] suppresses only the named rule: AG004 still fails"
+exit = 1
+
+[[findings]]
+id = "AG004"
+severity = "error"
+path = "agents/reviewer.md"
+line = 5
+column = 1

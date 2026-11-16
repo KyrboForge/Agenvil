@@ -1,0 +1,4 @@
+description = "malformed YAML is an input problem, not a finding"
+exit = 4
+golden = ["stderr"]
+stderr_contains = ["agents/reviewer.md"]

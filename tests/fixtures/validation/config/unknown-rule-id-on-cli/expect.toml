@@ -1,0 +1,4 @@
+description = "unknown rule ID after --only"
+exit = 2
+args = ["--only", "ZZ999"]
+stderr_contains = ["unknown rule ID `ZZ999`"]

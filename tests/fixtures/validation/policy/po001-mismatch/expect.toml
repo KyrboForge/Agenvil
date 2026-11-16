@@ -1,0 +1,10 @@
+description = "the model table disagrees with the agent"
+exit = 1
+golden = ["json", "github", "human"]
+
+[[findings]]
+id = "PO001"
+severity = "error"
+path = "POLICY.md"
+line = 5
+column = 1

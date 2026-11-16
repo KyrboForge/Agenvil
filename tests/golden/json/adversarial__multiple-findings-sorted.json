@@ -1,0 +1,117 @@
+{
+  "schema": 1,
+  "findings": [
+    {
+      "id": "PO001",
+      "severity": "error",
+      "path": "POLICY.md",
+      "line": 2,
+      "column": 1,
+      "message": "agent `zeta` has no row in the model table",
+      "fix": "Regenerate or correct the table so each agent has exactly one matching row."
+    },
+    {
+      "id": "PO001",
+      "severity": "error",
+      "path": "POLICY.md",
+      "line": 5,
+      "column": 1,
+      "message": "row for `alpha` says `opus` / `high` but agents/alpha.md sets `opus` / `max`",
+      "fix": "Regenerate or correct the table so each agent has exactly one matching row."
+    },
+    {
+      "id": "AG001",
+      "severity": "error",
+      "path": "agents/alpha.md",
+      "line": 2,
+      "column": 1,
+      "message": "`name` must equal the file name `alpha`",
+      "fix": "Add the missing keys and set `name` to the file name without `.md`."
+    },
+    {
+      "id": "AG003",
+      "severity": "error",
+      "path": "agents/alpha.md",
+      "line": 5,
+      "column": 1,
+      "message": "`effort: \"max\"` is not allowed; allowed: `low`, `medium`, `high`, `xhigh`",
+      "fix": "Use an allowed effort, or extend [policy.models.claude].efforts in agenvil.toml."
+    },
+    {
+      "id": "AG004",
+      "severity": "error",
+      "path": "agents/alpha.md",
+      "line": 5,
+      "column": 1,
+      "message": "`model: opus` with `effort: max` is not an allowed pair; allowed: `haiku+low`, `sonnet+medium`, `sonnet+high`, `opus+high`, `opus+xhigh`",
+      "fix": "Choose an allowed pair, or add the pair to [policy.models.claude].pairs."
+    },
+    {
+      "id": "AG002",
+      "severity": "error",
+      "path": "agents/zeta.md",
+      "line": 4,
+      "column": 1,
+      "message": "`model: \"gpt-4\"` is not allowed; allowed: `haiku`, `sonnet`, `opus`",
+      "fix": "Use an allowed model, or extend [policy.models.claude].models in agenvil.toml."
+    },
+    {
+      "id": "AG004",
+      "severity": "error",
+      "path": "agents/zeta.md",
+      "line": 5,
+      "column": 1,
+      "message": "`model: gpt-4` with `effort: high` is not an allowed pair; allowed: `haiku+low`, `sonnet+medium`, `sonnet+high`, `opus+high`, `opus+xhigh`",
+      "fix": "Choose an allowed pair, or add the pair to [policy.models.claude].pairs."
+    },
+    {
+      "id": "HY002",
+      "severity": "error",
+      "path": "bin/tool",
+      "line": 1,
+      "column": 1,
+      "message": "file does not start with a shebang (`#!`)",
+      "fix": "Add a shebang line and `chmod +x` the file."
+    },
+    {
+      "id": "SK002",
+      "severity": "warning",
+      "path": "skills/tdd/SKILL.md",
+      "line": null,
+      "column": null,
+      "message": "`effort` is not set; set it or write `effort: inherit`",
+      "fix": "Add `model` and `effort`, or set each to `inherit`."
+    },
+    {
+      "id": "SK002",
+      "severity": "warning",
+      "path": "skills/tdd/SKILL.md",
+      "line": null,
+      "column": null,
+      "message": "`model` is not set; set it or write `model: inherit`",
+      "fix": "Add `model` and `effort`, or set each to `inherit`."
+    },
+    {
+      "id": "SK001",
+      "severity": "error",
+      "path": "skills/tdd/SKILL.md",
+      "line": 2,
+      "column": 1,
+      "message": "`name` must equal the folder name `tdd`",
+      "fix": "Add SKILL.md with `name` equal to the folder name and a non-empty `description`."
+    },
+    {
+      "id": "SK001",
+      "severity": "error",
+      "path": "skills/tdd/SKILL.md",
+      "line": 3,
+      "column": 1,
+      "message": "`description` must not be empty",
+      "fix": "Add SKILL.md with `name` equal to the folder name and a non-empty `description`."
+    }
+  ],
+  "summary": {
+    "errors": 10,
+    "warnings": 2
+  }
+}

@@ -22,7 +22,7 @@ the kit does not define something, this page says so instead of guessing (see
 | HY001 | error | yes | implemented | no `[hygiene] personal_patterns` match in agents, skills and rules |
 | HY002 | error | yes | implemented | files in `bin/` start with `#!` and (Unix) have an executable bit |
 
-Deferred to the compatibility suite (#8), all `Check::Deferred` in the catalog: AG006, AG007,
+Deferred (not implemented; tracked in [`compatibility.md`](compatibility.md)), all `Check::Deferred` in the catalog: AG006, AG007,
 CF002, CF003, CF004, CN001, FM001, HY003, HY005, SK003–SK006, ST001, ST002, TL001, TL002, TP001,
 WF001.
 
@@ -77,7 +77,7 @@ a parse failure is never reported as a policy finding. Problems go to stderr, fi
 ## Known differences from the kit
 
 - **CF003 is not in `--fast`.** The kit lists it as fast, but it needs `git` (tracked files), and
-  `--fast` must not spawn processes. Deferred to #8 as a non-fast rule.
+  `--fast` must not spawn processes. The rule is deferred and, once implemented, non-fast.
 - **SK002** is a warning outside `--fast`. The kit's tier-based exemptions are deferred with
   SK003; until then every skill is held to the model/effort rule.
 - **AG004 pairs come from config.** The defaults match the kit's table

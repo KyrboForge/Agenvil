@@ -1,0 +1,17 @@
+description = "model outside the allowed set"
+exit = 1
+golden = ["json", "github", "human"]
+
+[[findings]]
+id = "AG002"
+severity = "error"
+path = "agents/reviewer.md"
+line = 4
+column = 1
+
+[[findings]]
+id = "AG004"
+severity = "error"
+path = "agents/reviewer.md"
+line = 5
+column = 1

@@ -1,0 +1,16 @@
+description = "[rules] turns errors into warnings (exit 0)"
+exit = 0
+
+[[findings]]
+id = "AG002"
+severity = "warning"
+path = "agents/reviewer.md"
+line = 4
+column = 1
+
+[[findings]]
+id = "AG004"
+severity = "warning"
+path = "agents/reviewer.md"
+line = 5
+column = 1

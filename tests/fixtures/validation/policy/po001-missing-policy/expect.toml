@@ -1,0 +1,4 @@
+description = "agents exist but POLICY.md is missing: unable to verify"
+exit = 4
+golden = ["stderr"]
+stderr_contains = ["POLICY.md"]

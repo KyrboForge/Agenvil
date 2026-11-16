@@ -1,0 +1,1 @@
+::error file=POLICY.md,line=5,col=1,title=PO001::row for `reviewer` says `sonnet` / `high` but agents/reviewer.md sets `opus` / `high` (fix: Regenerate or correct the table so each agent has exactly one matching row.)

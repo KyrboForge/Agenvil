@@ -1,0 +1,9 @@
+description = "a personal path in an agent body"
+exit = 1
+
+[[findings]]
+id = "HY001"
+severity = "error"
+path = "agents/reviewer.md"
+line = 8
+column = 17

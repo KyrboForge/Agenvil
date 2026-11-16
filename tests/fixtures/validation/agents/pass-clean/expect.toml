@@ -1,0 +1,3 @@
+description = "every implemented rule passes"
+exit = 0
+golden = ["json", "github", "human"]

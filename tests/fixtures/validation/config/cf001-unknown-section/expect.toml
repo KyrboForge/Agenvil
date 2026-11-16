@@ -1,0 +1,9 @@
+description = "defaults.toml has an unknown section"
+exit = 1
+
+[[findings]]
+id = "CF001"
+severity = "error"
+path = "config/defaults.toml"
+line = 7
+column = 2

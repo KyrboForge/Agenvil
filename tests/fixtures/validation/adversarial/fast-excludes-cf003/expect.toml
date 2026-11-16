@@ -1,0 +1,6 @@
+description = "--fast never selects CF003 (it needs git)"
+exit = 4
+args = ["--fast"]
+deferred = "select"
+stderr_contains = ["CF002"]
+stderr_excludes = ["CF003", "SK002"]
