@@ -1,5 +1,6 @@
 //! Agenvil: validate and build AI agent, skill and rule source trees.
 
+pub mod build;
 pub mod cli;
 pub mod config;
 pub mod diagnostics;

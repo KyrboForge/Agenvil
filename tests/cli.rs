@@ -6,7 +6,8 @@ use tempfile::TempDir;
 
 const VALID: &str = "schema = 1\n[project]\nname = \"demo\"\n";
 /// Commands that read the project config (`rules` and `explain` describe the built-in catalog).
-const PROJECT_COMMANDS: [&[&str]; 3] = [&["check"], &["inventory"], &["build"]];
+const PROJECT_COMMANDS: [&[&str]; 3] =
+    [&["check"], &["inventory"], &["build", "--target", "claude"]];
 
 fn agenvil(cwd: &TempDir) -> Command {
     let mut cmd = Command::cargo_bin("agenvil").unwrap();
@@ -110,17 +111,6 @@ fn invalid_config_exits_2_for_every_command() {
 }
 
 #[test]
-fn unimplemented_build_is_never_reported_as_clean() {
-    let dir = project(VALID);
-    agenvil(&dir)
-        .arg("build")
-        .assert()
-        .code(4)
-        .stdout("")
-        .stderr(predicate::str::contains("not implemented yet"));
-}
-
-#[test]
 fn rules_and_explain_need_no_config() {
     let dir = tempfile::tempdir().unwrap();
     agenvil(&dir)
@@ -167,7 +157,6 @@ fn root_is_cwd_by_default_or_explicit_from_anywhere() {
 fn commands_leave_the_project_untouched() {
     let dir = project(VALID);
     let before = entries(&dir);
-    agenvil(&dir).arg("build").assert().code(4);
     agenvil(&dir).arg("check").assert().code(4);
     for args in [&["inventory"][..], &["rules"], &["explain", "AG001"]] {
         agenvil(&dir).args(args).assert().code(0);

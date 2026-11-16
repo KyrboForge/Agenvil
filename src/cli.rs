@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+use crate::build;
 use crate::config::{Config, ConfigError};
 use crate::diagnostics::Exit;
 use crate::discovery::{Limits, OverlapError};
@@ -60,8 +61,21 @@ pub enum Command {
         /// Stable rule ID, for example AG001
         id: String,
     },
-    /// Build staged output; never touches ~/.claude (mutating)
-    Build,
+    /// Build a staging tree for one target; never installs or touches ~/.claude (mutating)
+    Build {
+        /// Target to build for
+        #[arg(long, value_enum)]
+        target: Target,
+        /// Output directory, replaced only if empty or written by an earlier build
+        /// [default: <root>/.generated/claude]
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum Target {
+    Claude,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -91,24 +105,12 @@ impl FailOn {
     }
 }
 
-impl Command {
-    fn name(&self) -> &'static str {
-        match self {
-            Self::Check { .. } => "check",
-            Self::Inventory { .. } => "inventory",
-            Self::Rules => "rules",
-            Self::Explain { .. } => "explain",
-            Self::Build => "build",
-        }
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 enum Error {
     #[error(transparent)]
     Config(#[from] ConfigError),
-    #[error("`agenvil {0}` is not implemented yet, so nothing was verified")]
-    NotImplemented(&'static str),
+    #[error(transparent)]
+    Build(#[from] build::Error),
     #[error(transparent)]
     Overlap(#[from] OverlapError),
     #[error(transparent)]
@@ -139,9 +141,8 @@ impl Error {
             Self::Config(_) | Self::Overlap(_) | Self::Settings(_) | Self::UnknownRule(_) => {
                 Exit::Usage
             }
-            Self::NotImplemented(_) | Self::Incomplete(_) | Self::Unavailable(_) => {
-                Exit::Unverifiable
-            }
+            Self::Incomplete(_) | Self::Unavailable(_) => Exit::Unverifiable,
+            Self::Build(error) => error.exit(),
             Self::Findings(_) => Exit::Findings,
             Self::Serialize(_) => Exit::Internal,
         }
@@ -231,8 +232,27 @@ fn execute(cli: &Cli) -> Result<(), Error> {
                 n => Err(Error::Findings(n)),
             }
         }
-        // Not implemented yet; none may claim success.
-        command => Err(Error::NotImplemented(command.name())),
+        Command::Build {
+            target: Target::Claude,
+            out,
+        } => {
+            let inventory = Inventory::build(root, &config, &build::limits())?;
+            let out = out.clone().unwrap_or_else(|| root.join(build::DEFAULT_OUT));
+            let built = build::claude(root, &config, &inventory, &out)?;
+            println!(
+                "built {} agent(s), {} skill(s) and {} rule(s) as {} file(s) in {}\n\
+                 staging only: nothing was installed; copy or link the tree yourself",
+                built.agents,
+                built.skills,
+                built.rules,
+                built.files,
+                built.out.display()
+            );
+            Ok(())
+        }
+        Command::Rules | Command::Explain { .. } => {
+            unreachable!("handled before the config is loaded")
+        }
     }
 }
 

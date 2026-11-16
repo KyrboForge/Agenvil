@@ -2,10 +2,9 @@
 
 `agenvil` validates and builds AI agent, skill and rule source trees. One Rust binary, one crate.
 
-> **Status: v0.1, in progress.** Configuration loading, exit codes, `inventory`, `check`, `rules`
-> and `explain` are implemented (see [`docs/rules.md`](docs/rules.md) for which rules). `build`
-> is not: it loads `agenvil.toml` and then exits `4` ("unable to verify") instead of reporting
-> success.
+> **Status: v0.1, in progress.** Configuration loading, exit codes, `inventory`, `check`, `rules`,
+> `explain` and `build --target claude` are implemented (see [`docs/rules.md`](docs/rules.md) for
+> which rules). Drift checks (`build --check`) and installation are not.
 
 ## Commands
 
@@ -15,7 +14,7 @@
 | `agenvil inventory [--format json]` | read-only, offline | list discovered resources as JSON |
 | `agenvil rules` | read-only | list validation rules and their status |
 | `agenvil explain <ID>` | read-only | explain one rule: rationale, failing and passing example, fix |
-| `agenvil build` | mutating | build staged output (never `~/.claude`) |
+| `agenvil build --target claude [--out DIR]` | writes `.generated/claude/` | build a Claude-native staging tree from the sources; never installs, never touches `~/.claude` ([`docs/build.md`](docs/build.md)) |
 
 `--root <DIR>` selects the project root; the default is the current directory. The config file is
 `<root>/agenvil.toml` unless `--config <FILE>` overrides it (no search of parent directories). It must be a regular file of at
@@ -27,10 +26,10 @@ outside the root.
 | Code | Meaning |
 | --- | --- |
 | 0 | success |
-| 1 | policy findings at or above `--fail-on` (`check`) |
-| 2 | usage or configuration error, including unknown rule IDs, severities and policy keys |
+| 1 | policy findings at or above `--fail-on` (`check`), or sources `build` cannot turn into valid output |
+| 2 | usage or configuration error, including unknown rule IDs, severities and policy keys, a disabled target or an unsafe `--out` |
 | 3 | internal error (including panics) |
-| 4 | unable to verify: a command or rule that is not implemented yet, or an inventory that is incomplete because of [problems](#problems); wins over `1` |
+| 4 | unable to verify: a rule that is not implemented yet, or an inventory that is incomplete because of [problems](#problems); wins over `1` |
 
 ## `agenvil inventory`
 
@@ -103,13 +102,21 @@ as a half-parsed resource. Problems are parse/IO failures, not policy findings (
 - Platform: path handling is lexical and the walk uses `/`-normalised paths, so output is the same
   on macOS, Linux and Windows. CI runs on all three; the symlink and FIFO tests run on Unix only.
 
-### For the validator and the Claude builder
+### For the validator and the builder
 
 `inventory::Inventory::build(root, &config, &Limits)` is the shared entry point: it returns
 `Resource`s (`name`, `path`, `frontmatter`, `body_start_line`, `source`) and `Problem`s, and
 parses frontmatter only through `frontmatter::parse`. Consumers should treat `Problem`s as "input
 unusable" and keep policy findings separate. `Frontmatter::metadata` is a
 `serde_json::Map<String, Value>`, so no Claude field is hard-coded in a schema.
+
+## `agenvil build`
+
+`agenvil build --target claude` turns an `agenvil.toml`, `agents/` and `skills/` into a Claude Code
+staging tree in `.generated/claude/`. The output is **staging only**: nothing is installed, and
+`~/.claude` is never written. Copy or link the tree where you want it. See
+[`docs/build.md`](docs/build.md) for a minimal project, skill references, model/effort mapping,
+the manifest and the safety rules.
 
 ## `agenvil check`
 
