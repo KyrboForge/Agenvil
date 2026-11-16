@@ -100,7 +100,7 @@ as a half-parsed resource. Problems are parse/IO failures, not policy findings (
 - Not yet: registries, policy files, JSON/TOML resources, symlinks that stay inside the root,
   content hashes, other output formats than JSON.
 - Platform: path handling is lexical and the walk uses `/`-normalised paths, so output is the same
-  on macOS, Linux and Windows. Windows is not part of CI yet; the symlink tests run on Unix only.
+  on macOS, Linux and Windows. CI runs on all three; the symlink and FIFO tests run on Unix only.
 
 ### For the validator and the Claude builder
 
@@ -137,8 +137,24 @@ See [`examples/agenvil.toml`](examples/agenvil.toml); it is parsed by a unit tes
 Minimum supported Rust version: **1.89** (Rust 2024 edition; declared as `rust-version`). It was
 1.85 before `inventory`: the `ignore` and `serde-saphyr` crates require 1.88 and 1.89.
 
+### CI
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every pull request to `main`, on
+pushes to `main` and on manual dispatch. It has read-only permissions, uses no secrets and pins
+third-party actions to commit SHAs. Pull requests only restore the Cargo cache; `main` saves it.
+
+| Job | Runs on | Commands |
+| --- | --- | --- |
+| `test` | Ubuntu, macOS, Windows (stable Rust) | `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets -- -D warnings`, `cargo test --locked --all-targets`, `cargo build --locked` |
+| `msrv` | Ubuntu, Rust from `rust-version` in `Cargo.toml` | `cargo build --locked`, `cargo test --locked --all-targets` |
+
+Run the same checks locally (`--locked` fails if `Cargo.lock` is out of date). Tests use temporary
+directories and never read or write your real HOME.
+
 ```sh
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked --all-targets
+cargo build --locked
+cargo +1.89 test --locked --all-targets   # MSRV; needs `rustup toolchain install 1.89`
 ```
