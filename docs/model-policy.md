@@ -78,7 +78,7 @@ resolved on the Anthropic API, where every current model accepts all five levels
 resolves an alias to an older model may still lower the effort, so pin a full ID to have it checked.
 A lone `effort` cannot be checked against the inherited model at all.
 
-This is a library API; no CLI command or rule calls it yet. The Claude builder (#10) will.
+`agenvil build --target claude` calls it for every agent and skill ([build.md](build.md)); no rule does yet.
 
 ## Adding a target
 
