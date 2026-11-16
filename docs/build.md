@@ -133,7 +133,7 @@ then path, so it is deterministic. Files are compared by size and SHA-256.
 | Class | Meaning |
 | --- | --- |
 | `missing` | the plan generates it but it is not on disk (or the whole staging directory is absent) |
-| `changed` | on disk but its size or SHA-256 differs from the plan |
+| `changed` | on disk but its size, SHA-256 or executable bit differs from the plan; or every file matches but `manifest.json` differs from the one the build would write (generator version, order) |
 | `stale` | listed by the previous build's manifest, no longer generated |
 | `extra` | on disk, not generated and not in the manifest: yours, never deleted |
 | `manifest-invalid` | `manifest.json` is absent, unparsable, an unsupported `schema`, an unexpected `owner` or `target`, has duplicate or case-colliding paths, Windows-invalid paths, a file/directory conflict, or sizes that exceed the limits |

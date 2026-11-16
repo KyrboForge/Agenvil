@@ -175,7 +175,9 @@ fn walk(dir: &Path, under: &str, depth: usize, state: &mut Scan) -> Result<(), S
             "directories are nested deeper than {MAX_DEPTH} levels at `{under}`"
         )));
     }
+    // Read at most one name past the budget, so a huge directory cannot exhaust memory first.
     let mut names: Vec<_> = fs::read_dir(dir)?
+        .take(manifest::MAX_ENTRIES.saturating_sub(state.entries) + 1)
         .map(|e| e.map(|e| e.file_name()))
         .collect::<Result<_, _>>()?;
     names.sort();
@@ -426,6 +428,19 @@ fn compare(tree: &Tree, expected: &[Entry]) -> Vec<Finding> {
                 "listed in the manifest, no longer generated, already gone",
             ));
         }
+    }
+    // Every file agrees, yet a build would still rewrite the manifest (generator version, order).
+    if findings.is_empty()
+        && let Some(Node::File(bytes)) = tree.nodes.get(manifest::FILE)
+        && build::manifest_of(expected)
+            .to_json()
+            .is_ok_and(|json| json.as_bytes() != bytes.as_slice())
+    {
+        findings.push(finding(
+            Kind::Changed,
+            manifest::FILE,
+            "differs from the manifest the build would write",
+        ));
     }
     findings
 }
@@ -986,6 +1001,32 @@ mod tests {
             ]
         );
         assert!(found[2].detail.contains("modified"));
+    }
+
+    #[test]
+    fn manifest_only_drift_is_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = [
+            entry(".claude/agents/a.md", AGENT),
+            entry(".claude/agents/b.md", AGENT),
+        ];
+        let reordered = [
+            entry(".claude/agents/b.md", AGENT),
+            entry(".claude/agents/a.md", AGENT),
+        ];
+        let path = dir.path().join(manifest::FILE);
+        let canonical = build::manifest_of(&plan).to_json().unwrap();
+        let tampered = canonical.replace(
+            &format!("\"version\": \"{}\"", env!("CARGO_PKG_VERSION")),
+            "\"version\": \"tampered\"",
+        );
+        assert_ne!(canonical, tampered);
+        for manifest in [tampered, build::manifest_of(&reordered).to_json().unwrap()] {
+            write(dir.path(), &plan);
+            fs::write(&path, manifest).unwrap();
+            let found = compare(&scan(dir.path()).unwrap(), &plan);
+            assert_eq!(kinds(&found), [(Kind::Changed, "manifest.json")]);
+        }
     }
 
     #[test]
