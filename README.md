@@ -2,16 +2,16 @@
 
 `agenvil` validates and builds AI agent, skill and rule source trees. One Rust binary, one crate.
 
-> **Status: v0.1 scaffold.** The CLI, configuration loading and exit codes exist. No command is
-> implemented yet: every subcommand loads `agenvil.toml` and then exits `4` ("unable to verify")
-> instead of reporting success.
+> **Status: v0.1, in progress.** Configuration loading, exit codes and `inventory` are implemented.
+> `check`, `rules`, `explain` and `build` are not: they load `agenvil.toml` and then exit `4`
+> ("unable to verify") instead of reporting success.
 
 ## Commands
 
 | Command | Kind | Purpose |
 | --- | --- | --- |
 | `agenvil check` | read-only, offline | validate the source tree |
-| `agenvil inventory` | read-only, offline | list discovered resources |
+| `agenvil inventory [--format json]` | read-only, offline | list discovered resources as JSON |
 | `agenvil rules` | read-only | list validation rules |
 | `agenvil explain <ID>` | read-only | explain one finding ID |
 | `agenvil build` | mutating | build staged output (never `~/.claude`) |
@@ -29,7 +29,86 @@ outside the root.
 | 1 | policy findings |
 | 2 | usage or configuration error |
 | 3 | internal error (including panics) |
-| 4 | unable to verify (for example, a command that is not implemented yet) |
+| 4 | unable to verify: a command that is not implemented yet, or an inventory that is incomplete because of [problems](#problems) |
+
+## `agenvil inventory`
+
+Discovers `agents/*.md`, `skills/*/SKILL.md` and `rules/*.md` (directories from `[paths]`), splits
+each file into YAML frontmatter and Markdown body, and prints one JSON document on stdout. It only
+reads files; it never executes, imports or follows anything found in the tree.
+
+```json
+{
+  "schema": 1,
+  "agents": [
+    {
+      "name": "reviewer",
+      "path": "agents/reviewer.md",
+      "bytes": 120,
+      "frontmatter": { "start_line": 1, "end_line": 5, "metadata": { "model": "opus", "skills": ["tdd"] } },
+      "body_start_line": 6
+    }
+  ],
+  "skills": [],
+  "rules": [],
+  "problems": []
+}
+```
+
+- **Deterministic:** resources are sorted by path, `metadata` keys are sorted, and no absolute
+  paths, timestamps or machine data appear. Paths are relative to the root and use `/` on every OS.
+- `name` is the file stem (agents, rules) or the directory name (skills). The frontmatter `name`
+  is only another `metadata` field.
+- `metadata` is every top-level frontmatter key, unvalidated: Claude fields such as `model`,
+  `effort` and `skills`, and unknown keys, are passed through as plain JSON values. Whether a key
+  is allowed or required is policy and belongs to `check`. YAML 1.2 booleans only, so
+  `skills: [x, y, n]` stays a list of strings. `frontmatter` is `null` for a file without a leading
+  `---` block. Line numbers are 1-based file lines (BOM and CRLF do not shift them).
+- The Markdown body is not in the JSON (`body_start_line` locates it). Library consumers get the
+  exact file text, BOM and CRLF included, in `Resource::source`.
+- **Missing directories are not an error:** nothing is discovered there. Files and directories
+  that do not match the layout (other extensions, deeper levels, extra files in a skill
+  directory) are not resources and are ignored.
+- **`.gitignore`:** `.gitignore` files inside the root are honored, with or without a git
+  repository. Ignore files above the root, global git config and `.ignore` files are not read, so
+  output does not depend on where the project is checked out.
+- Two configured directories may not be the same or nested in each other (exit `2`).
+
+### Problems
+
+A file that cannot be read or parsed is reported in `problems` (`path`, 1-based `line` when known,
+`kind`, `message`) instead of aborting the run, and the command exits `4` after printing the JSON,
+because the inventory is incomplete. Kinds: `symlink`, `not-regular-file`, `too-large`,
+`unreadable`, `invalid-utf8`, `invalid-path`, `missing-skill-file`, `not-a-directory`,
+`limit-exceeded`, `frontmatter`. A file with malformed frontmatter appears only as a problem, never
+as a half-parsed resource. Problems are parse/IO failures, not policy findings (exit `1`, `check`).
+
+### Safety limits
+
+- Symlinks are never followed or read, including in parent components of a configured directory;
+  they are reported as `symlink` problems. Nothing outside the root is opened.
+- At most 1 MiB per file, 64 MiB in total and 10 000 directory entries per run; the scan depth is
+  fixed by the layout. FIFOs and other special files are never opened.
+- YAML is parsed with a tight alias, anchor, node and nesting budget, so alias bombs and deeply
+  nested documents become `frontmatter` problems instead of exhausting memory. YAML tags are
+  data, never instantiated.
+
+### Limitations
+
+- Between checking a path and opening it a concurrent local attacker could swap in a symlink;
+  `O_NOFOLLOW` opens are a possible hardening (marked `shortcut:` in the code).
+- Not yet: registries, policy files, JSON/TOML resources, symlinks that stay inside the root,
+  content hashes, other output formats than JSON.
+- Platform: path handling is lexical and the walk uses `/`-normalised paths, so output is the same
+  on macOS, Linux and Windows. Windows is not part of CI yet; the symlink tests run on Unix only.
+
+### For the validator and the Claude builder
+
+`inventory::Inventory::build(root, &config, &Limits)` is the shared entry point: it returns
+`Resource`s (`name`, `path`, `frontmatter`, `body_start_line`, `source`) and `Problem`s, and
+parses frontmatter only through `frontmatter::parse`. Consumers should treat `Problem`s as "input
+unusable" and keep policy findings separate. `Frontmatter::metadata` is a
+`serde_json::Map<String, Value>`, so no Claude field is hard-coded in a schema.
 
 ## `agenvil.toml` schema (version 1)
 
@@ -48,13 +127,15 @@ See [`examples/agenvil.toml`](examples/agenvil.toml); it is parsed by a unit tes
 - Unknown keys are rejected everywhere, so typos and not-yet-supported options fail loudly.
 - Paths are relative to the project root, non-empty, use `/` as separator and cannot start with
   `/` or contain `..`, `\` or `:`. The same rules apply on every OS, so Windows drive and UNC paths
-  are rejected everywhere. This check is lexical; symlinks inside the tree are not resolved.
+  are rejected everywhere. `.` and empty segments are dropped (`./agents//` is `agents`). The check
+  is lexical; discovery separately refuses to follow symlinks.
 - **Version policy:** `schema` is bumped only for incompatible changes. A file with a different
   `schema` is rejected as unsupported before any other key is validated.
 
 ## Development
 
-Minimum supported Rust version: **1.85** (Rust 2024 edition; declared as `rust-version`).
+Minimum supported Rust version: **1.89** (Rust 2024 edition; declared as `rust-version`). It was
+1.85 before `inventory`: the `ignore` and `serde-saphyr` crates require 1.88 and 1.89.
 
 ```sh
 cargo fmt --check
