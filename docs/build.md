@@ -157,9 +157,9 @@ separate work and read this file.
 - The build is staged in a temporary sibling directory and renamed into place only after every
   file was written, so a failure leaves no partial output and keeps a previous good build.
 - An existing `--out` is replaced only if it is empty or holds an earlier Agenvil build: its
-  `manifest.json` has `owner: "agenvil"` and `target: "claude"` and every file in it is listed. A
-  file you added, another tool's directory or a non-directory makes the build fail untouched
-  (exit 2).
+  `manifest.json` has `owner: "agenvil"` and `target: "claude"` and every file in it is listed with
+  its recorded size and sha256. A file you added or edited, another tool's directory or a
+  non-directory makes the build fail untouched (exit 2).
 - Ownership is checked again on the old output after it is moved aside, right before anything is
   deleted, so a directory that changed in between is put back untouched. Names that are not UTF-8
   and a `manifest.json` that is not a regular file count as foreign.

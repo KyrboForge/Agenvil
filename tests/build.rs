@@ -583,6 +583,19 @@ fn a_manifest_that_is_not_a_regular_file_is_never_opened() {
 }
 
 #[test]
+fn a_hand_edited_generated_file_is_never_overwritten() {
+    let p = Project::new(&[("agents/a.md", b"---\nname: a\ndescription: A.\n---\n")]);
+    p.build().success();
+    p.write(".generated/claude/.claude/agents/a.md", b"my edit");
+    p.build()
+        .code(2)
+        .stderr(predicate::str::contains("was changed since"));
+    assert_eq!(p.staged(".claude/agents/a.md"), b"my edit");
+}
+
+// Windows cannot create such a name (`:` opens an alternate data stream).
+#[cfg(unix)]
+#[test]
 fn entry_names_that_are_not_portable_fail_the_build() {
     let p = Project::new(&[("agents/a.md", b"---\nname: a\ndescription: A.\n---\n")]);
     p.write("rules/a:b.md", b"rule\n");

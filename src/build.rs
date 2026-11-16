@@ -144,6 +144,8 @@ struct OldManifest {
 #[derive(Deserialize)]
 struct OldFile {
     path: String,
+    sha256: String,
+    bytes: u64,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -509,11 +511,20 @@ impl Walk<'_> {
         };
         // Never collect more than the budget allows: a huge directory is cut off while reading.
         let room = self.limits.max_entries.saturating_sub(self.seen);
-        let mut names: Vec<_> = read
-            .filter_map(Result::ok)
-            .map(|e| e.file_name())
-            .take(room + 1)
-            .collect();
+        let mut names = Vec::new();
+        for entry in read.take(room + 1) {
+            match entry {
+                Ok(entry) => names.push(entry.file_name()),
+                // A skipped entry would be a silently incomplete build.
+                Err(_) => {
+                    return self.problem(
+                        dir,
+                        ProblemKind::Unreadable,
+                        "could not read a directory entry",
+                    );
+                }
+            }
+        }
         if names.len() > room {
             return self.problem(
                 dir,
@@ -678,7 +689,7 @@ fn check_out(root: &Path, config: &Config, out: &Path) -> Result<(), Error> {
 }
 
 /// Why `dir` is not safe to replace, or `None` if it is empty or holds only an earlier Agenvil
-/// build: its `manifest.json` has the right owner and target and lists every file in it.
+/// build: its `manifest.json` has the right owner and target and lists every file in it, unchanged.
 fn foreign(dir: &Path) -> io::Result<Option<String>> {
     if fs::read_dir(dir)?.next().is_none() {
         return Ok(None);
@@ -698,21 +709,23 @@ fn foreign(dir: &Path) -> io::Result<Option<String>> {
     let Some(old) = old.filter(|m| m.owner == OWNER && m.target == TARGET) else {
         return no_manifest();
     };
-    let mut owned: BTreeSet<String> = old.files.into_iter().map(|f| f.path).collect();
-    owned.insert(MANIFEST_FILE.to_owned());
+    let owned: BTreeMap<String, OldFile> =
+        old.files.into_iter().map(|f| (f.path.clone(), f)).collect();
     let mut stray = Vec::new();
     unowned(dir, "", &owned, &mut stray, &mut 0)?;
     Ok(stray.first().map(|path| {
-        format!("`{path}` was not written by Agenvil, so the directory is not safe to replace")
+        format!(
+            "`{path}` was not written by Agenvil or was changed since, so the directory is not safe to replace"
+        )
     }))
 }
 
-/// Collects files under `dir` that the old manifest does not list. Symlinks, special files and
-/// names that are not UTF-8 count as foreign.
+/// Collects files under `dir` that the old manifest does not list, or whose content no longer
+/// matches it (a hand edit). Symlinks, special files and names that are not UTF-8 count as foreign.
 fn unowned(
     dir: &Path,
     under: &str,
-    owned: &BTreeSet<String>,
+    owned: &BTreeMap<String, OldFile>,
     stray: &mut Vec<String>,
     seen: &mut usize,
 ) -> io::Result<()> {
@@ -730,11 +743,36 @@ fn unowned(
             stray.push(path);
         } else if kind.is_dir() {
             unowned(&entry.path(), &path, owned, stray, seen)?;
-        } else if !kind.is_file() || !owned.contains(&path) {
+        } else if path == MANIFEST_FILE {
+        } else if !kind.is_file()
+            || !owned
+                .get(&path)
+                .is_some_and(|f| unchanged(&entry.path(), f))
+        {
             stray.push(path);
         }
     }
     Ok(())
+}
+
+/// Whether the file still has the size and sha256 the old manifest recorded.
+fn unchanged(path: &Path, old: &OldFile) -> bool {
+    if old.bytes > limits().max_file_bytes
+        || fs::metadata(path).map(|m| m.len()).ok() != Some(old.bytes)
+    {
+        return false;
+    }
+    let mut bytes = Vec::new();
+    File::open(path)
+        .and_then(|f| f.take(old.bytes + 1).read_to_end(&mut bytes))
+        .is_ok_and(|_| sha256(&bytes) == old.sha256)
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// Absolute path with the longest existing prefix canonicalised, so a symlinked parent cannot
@@ -763,10 +801,7 @@ fn manifest(entries: &[Entry]) -> serde_json::Result<String> {
         .map(|e| ManifestFile {
             path: &e.path,
             source: &e.source,
-            sha256: Sha256::digest(&e.bytes)
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect(),
+            sha256: sha256(&e.bytes),
             bytes: e.bytes.len(),
             transform: e.transform,
         })
