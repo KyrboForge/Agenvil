@@ -106,6 +106,8 @@ issue; until then the parity column stays `blocked` or `deferred` rather than `a
 | 7 | Incomplete coverage: 19 rules are deferred. A default `check` exits `4` until they are implemented or explicitly skipped. | Failing closed beats a green result that skipped rules. | proposed (not a deviation to approve, a gap to close: F2-F7) |
 | 8 | HY002 checks the executable bit on Unix only. | Windows has no such bit; CI runs on Windows. | proposed |
 | 9 | A symlink is an input problem (exit 4); a BOM or CRLF is accepted. HY003 and HY005 would report these as warnings. | Symlinks are never followed (safety); BOM/CRLF handling follows #6. The shell's behaviour is unverified. | proposed; F6 |
+| 10 | The model policy is validated when `agenvil.toml` loads, and `[[targets.claude.map]]` adds explicit overrides; neither needs `POLICY.md`. | #9: a standalone project must not need kit files. PO001 itself is unchanged. | proposed |
+| 11 | PO001, AG001, SK002, the default pairs and the example config still follow kit conventions. | Not changed in #9 to avoid silent behaviour changes; corrections proposed in #29. | proposed; #29 |
 
 ## Proposed follow-up issues
 

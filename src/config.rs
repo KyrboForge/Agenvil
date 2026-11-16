@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::target::{PairMap, claude_native, claude_supports};
+
 /// Config file name, looked up directly under the project root.
 pub const FILE_NAME: &str = "agenvil.toml";
 /// The only supported `schema` value.
@@ -34,6 +36,11 @@ pub enum ConfigError {
     MissingSchema { path: PathBuf },
     #[error("invalid {}: unsupported schema version {found} (this agenvil supports {SCHEMA_VERSION})", .path.display())]
     UnsupportedSchema { path: PathBuf, found: i64 },
+    #[error("invalid {}:\n{}", .path.display(), .problems.join("\n"))]
+    Policy {
+        path: PathBuf,
+        problems: Vec<String>,
+    },
 }
 
 /// Unknown keys are rejected everywhere so typos never pass silently.
@@ -135,11 +142,17 @@ pub struct Targets {
 #[serde(deny_unknown_fields, default)]
 pub struct ClaudeTarget {
     pub enabled: bool,
+    /// Explicit source-pair to target-pair overrides. A pair without an entry is used as is, or
+    /// rejected when Claude does not support it; there is no implicit fallback.
+    pub map: Vec<PairMap>,
 }
 
 impl Default for ClaudeTarget {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            map: Vec::new(),
+        }
     }
 }
 
@@ -265,6 +278,80 @@ impl Config {
         Self::parse(&text, &path)
     }
 
+    /// Every inconsistency in the Claude model policy and its target mappings, so one run lists
+    /// them all. The values themselves may be any strings: whether the target supports them is
+    /// decided at resolution time, except for mapping targets, which must be supported here.
+    fn model_policy_problems(&self) -> Vec<String> {
+        let (policy, map) = (&self.policy.models.claude, &self.targets.claude.map);
+        let mut problems = Vec::new();
+        let mut list = |key: &str, items: Vec<&String>| {
+            let mut seen = Vec::new();
+            for item in items {
+                if item.trim().is_empty() {
+                    problems.push(format!("{key}: values must not be empty"));
+                } else if seen.contains(&item) {
+                    problems.push(format!("{key}: `{item}` is listed twice"));
+                }
+                seen.push(item);
+            }
+        };
+        list(
+            "[policy.models.claude].models",
+            policy.models.iter().collect(),
+        );
+        list(
+            "[policy.models.claude].efforts",
+            policy.efforts.iter().collect(),
+        );
+        let mut pairs: Vec<&[String; 2]> = Vec::new();
+        for pair in &policy.pairs {
+            let [model, effort] = pair;
+            if !policy.models.contains(model) {
+                problems.push(format!(
+                    "[policy.models.claude].pairs: {model}/{effort} uses a model missing from `models`"
+                ));
+            }
+            if !policy.efforts.contains(effort) {
+                problems.push(format!(
+                    "[policy.models.claude].pairs: {model}/{effort} uses an effort missing from `efforts`"
+                ));
+            }
+            if pairs.contains(&pair) {
+                problems.push(format!(
+                    "[policy.models.claude].pairs: {model}/{effort} is listed twice"
+                ));
+            }
+            pairs.push(pair);
+        }
+        let mut sources: Vec<&[String; 2]> = Vec::new();
+        for entry in map {
+            let [model, effort] = &entry.source;
+            if !pairs.contains(&&entry.source) {
+                problems.push(format!(
+                    "[[targets.claude.map]]: source {model}/{effort} is not in [policy.models.claude].pairs"
+                ));
+            }
+            if sources.contains(&&entry.source) {
+                problems.push(format!(
+                    "[[targets.claude.map]]: source {model}/{effort} is mapped twice"
+                ));
+            }
+            sources.push(&entry.source);
+            if let Err(reason) = claude_native(&entry.source) {
+                problems.push(format!(
+                    "[[targets.claude.map]]: source {model}/{effort} is not native Claude frontmatter: {reason}"
+                ));
+            }
+            if let Err(reason) = claude_supports(&entry.target) {
+                problems.push(format!(
+                    "[[targets.claude.map]]: target {}/{} for source {model}/{effort} is not supported: {reason}",
+                    entry.target[0], entry.target[1]
+                ));
+            }
+        }
+        problems
+    }
+
     /// Parses `text`; `path` is only used in error messages.
     pub fn parse(text: &str, path: &Path) -> Result<Self, ConfigError> {
         let parse_err = |source| ConfigError::Parse {
@@ -276,7 +363,18 @@ impl Config {
             None => Err(ConfigError::MissingSchema {
                 path: path.to_owned(),
             }),
-            Some(SCHEMA_VERSION) => toml::from_str(text).map_err(parse_err),
+            Some(SCHEMA_VERSION) => {
+                let config: Self = toml::from_str(text).map_err(parse_err)?;
+                let problems = config.model_policy_problems();
+                if problems.is_empty() {
+                    Ok(config)
+                } else {
+                    Err(ConfigError::Policy {
+                        path: path.to_owned(),
+                        problems,
+                    })
+                }
+            }
             Some(found) => Err(ConfigError::UnsupportedSchema {
                 path: path.to_owned(),
                 found,
@@ -307,6 +405,49 @@ mod tests {
         assert_eq!(config.paths.skills.as_path(), Path::new("skills"));
         assert_eq!(config.paths.rules.as_path(), Path::new("rules"));
         assert!(config.targets.claude.enabled);
+    }
+
+    #[test]
+    fn invalid_model_policy_lists_every_problem() {
+        let message = err(&format!(
+            "{MINIMAL}[policy.models.claude]\nmodels = [\"opus\", \"opus\", \"\"]\nefforts = [\"high\"]\npairs = [[\"opus\", \"low\"], [\"sonnet\", \"high\"], [\"opus\", \"high\"], [\"opus\", \"high\"]]\n"
+        ));
+        for needle in [
+            "models: `opus` is listed twice",
+            "models: values must not be empty",
+            "opus/low uses an effort missing from `efforts`",
+            "sonnet/high uses a model missing from `models`",
+            "opus/high is listed twice",
+        ] {
+            assert!(message.contains(needle), "{needle}\n{message}");
+        }
+    }
+
+    #[test]
+    fn invalid_target_mappings_are_rejected() {
+        let message = err(&format!(
+            "{MINIMAL}[[targets.claude.map]]\nsource = [\"opus\", \"max\"]\ntarget = [\"opus\", \"high\"]\n[[targets.claude.map]]\nsource = [\"opus\", \"high\"]\ntarget = [\"opus\", \"ultra\"]\n[[targets.claude.map]]\nsource = [\"opus\", \"high\"]\ntarget = [\"opus\", \"high\"]\n"
+        ));
+        for needle in [
+            "source opus/max is not in [policy.models.claude].pairs",
+            "source opus/high is mapped twice",
+            "`ultra` is not a Claude effort level",
+        ] {
+            assert!(message.contains(needle), "{needle}\n{message}");
+        }
+        // Sources must be native; targets must be verifiably supported, not merely well formed.
+        let message = err(&format!(
+            "{MINIMAL}[policy.models.claude]\nmodels = [\"gpt-x\", \"opus\"]\nefforts = [\"high\", \"xhigh\"]\npairs = [[\"gpt-x\", \"high\"], [\"opus\", \"xhigh\"], [\"opus\", \"high\"]]\n[[targets.claude.map]]\nsource = [\"gpt-x\", \"high\"]\ntarget = [\"opus\", \"high\"]\n[[targets.claude.map]]\nsource = [\"opus\", \"xhigh\"]\ntarget = [\"claude-opus-4-6\", \"xhigh\"]\n[[targets.claude.map]]\nsource = [\"opus\", \"high\"]\ntarget = [\"claude-not-a-real-model\", \"high\"]\n"
+        ));
+        for needle in [
+            "source gpt-x/high is not native Claude frontmatter",
+            "`claude-opus-4-6` does not support effort `xhigh`",
+            "`claude-not-a-real-model` is not a model ID with documented effort support",
+        ] {
+            assert!(message.contains(needle), "{needle}\n{message}");
+        }
+        // Mapping keys are strict like the rest of the file.
+        assert!(parse(&format!("{MINIMAL}[[targets.claude.map]]\nsource = [\"a\", \"b\"]\ntarget = [\"a\", \"b\"]\nx = 1\n")).is_err());
     }
 
     #[test]

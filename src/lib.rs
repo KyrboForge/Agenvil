@@ -7,4 +7,5 @@ pub mod discovery;
 pub mod frontmatter;
 pub mod inventory;
 pub mod report;
+pub mod target;
 pub mod validate;
