@@ -9,9 +9,35 @@ name = "team-agents-kit"
 agents = "agents"
 skills = "skills"
 rules = "rules"
+policy = "POLICY.md"
+defaults = "config/defaults.toml"
+bin = "bin"
 
 [targets.claude]
 enabled = true
 
-# Allowed (model, effort) pairs are defined later; the table is accepted but empty.
+# What agents may declare (AG002-AG004).
 [policy.models.claude]
+models = ["haiku", "sonnet", "opus"]
+efforts = ["low", "medium", "high", "xhigh"]
+pairs = [
+  ["haiku", "low"],
+  ["sonnet", "medium"],
+  ["sonnet", "high"],
+  ["opus", "high"],
+  ["opus", "xhigh"],
+]
+
+# Override a rule's severity, or turn it off: "error", "warning" or "off".
+[rules]
+SK002 = "warning"
+
+# Suppress one rule in one file. `reason` is required.
+# [[ignore]]
+# rule = "AG002"
+# path = "agents/vendor.md"
+# reason = "pinned vendor model"
+
+# Regexes that must not appear in agents, skills and rules (HY001).
+[hygiene]
+personal_patterns = ['/Users/', '~/\.agents/']

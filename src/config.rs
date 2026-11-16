@@ -1,5 +1,6 @@
 //! Typed, strict loading of `agenvil.toml`.
 
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -47,6 +48,46 @@ pub struct Config {
     pub targets: Targets,
     #[serde(default)]
     pub policy: Policy,
+    /// Per-rule severity overrides, keyed by rule ID. The IDs are checked by the validator.
+    #[serde(default)]
+    pub rules: BTreeMap<String, Level>,
+    #[serde(default)]
+    pub ignore: Vec<Ignore>,
+    #[serde(default)]
+    pub hygiene: Hygiene,
+}
+
+/// What a rule does when it is configured in `[rules]`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Level {
+    Error,
+    Warning,
+    Off,
+}
+
+/// Suppresses one rule for one file. A reason is mandatory so ignores stay reviewable.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Ignore {
+    pub rule: String,
+    pub path: RelPath,
+    pub reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Hygiene {
+    /// Regular expressions (Rust syntax, linear-time) that must not occur in the checked files.
+    pub personal_patterns: Vec<String>,
+}
+
+impl Default for Hygiene {
+    fn default() -> Self {
+        Self {
+            personal_patterns: vec!["/Users/".to_owned(), r"~/\.agents/".to_owned()],
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,6 +103,12 @@ pub struct Paths {
     pub agents: RelPath,
     pub skills: RelPath,
     pub rules: RelPath,
+    /// Markdown file with the generated model table.
+    pub policy: RelPath,
+    /// Team defaults, validated by CF001 when present.
+    pub defaults: RelPath,
+    /// Scripts checked by HY002 when present.
+    pub bin: RelPath,
 }
 
 impl Default for Paths {
@@ -71,6 +118,9 @@ impl Default for Paths {
             agents: rel("agents"),
             skills: rel("skills"),
             rules: rel("rules"),
+            policy: rel("POLICY.md"),
+            defaults: rel("config/defaults.toml"),
+            bin: rel("bin"),
         }
     }
 }
@@ -93,7 +143,6 @@ impl Default for ClaudeTarget {
     }
 }
 
-/// Accepted but empty: allowed (model, effort) pairs are not defined yet.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Policy {
@@ -106,9 +155,33 @@ pub struct Models {
     pub claude: ClaudeModels,
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ClaudeModels {}
+/// Native Claude `model` and `effort` values that agents may declare, and the pairs that may be
+/// combined. The defaults are the Team Agents Kit starting point.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ClaudeModels {
+    pub models: Vec<String>,
+    pub efforts: Vec<String>,
+    pub pairs: Vec<[String; 2]>,
+}
+
+impl Default for ClaudeModels {
+    fn default() -> Self {
+        let own = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect();
+        let pair = |m: &str, e: &str| [m.to_owned(), e.to_owned()];
+        Self {
+            models: own(&["haiku", "sonnet", "opus"]),
+            efforts: own(&["low", "medium", "high", "xhigh"]),
+            pairs: vec![
+                pair("haiku", "low"),
+                pair("sonnet", "medium"),
+                pair("sonnet", "high"),
+                pair("opus", "high"),
+                pair("opus", "xhigh"),
+            ],
+        }
+    }
+}
 
 /// A non-empty path relative to the project root that cannot escape it.
 ///
@@ -123,6 +196,12 @@ pub struct RelPath(PathBuf);
 impl RelPath {
     pub fn as_path(&self) -> &Path {
         &self.0
+    }
+
+    /// `/`-joined form, identical on every OS (validated input is always UTF-8).
+    pub fn to_slash(&self) -> String {
+        let parts: Vec<_> = self.0.iter().map(|s| s.to_string_lossy()).collect();
+        parts.join("/")
     }
 }
 
@@ -157,7 +236,12 @@ struct SchemaProbe {
 impl Config {
     /// Loads `<root>/agenvil.toml`.
     pub fn load(root: &Path) -> Result<Self, ConfigError> {
-        let path = root.join(FILE_NAME);
+        Self::load_file(&root.join(FILE_NAME))
+    }
+
+    /// Loads the config from an explicit file path.
+    pub fn load_file(path: &Path) -> Result<Self, ConfigError> {
+        let path = path.to_path_buf();
         let read_err = |source| ConfigError::Read {
             path: path.clone(),
             source,

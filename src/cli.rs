@@ -8,6 +8,8 @@ use crate::config::{Config, ConfigError};
 use crate::diagnostics::Exit;
 use crate::discovery::{Limits, OverlapError};
 use crate::inventory::Inventory;
+use crate::report;
+use crate::validate::{self, Check, Options, Plan, SettingsError, Severity};
 
 #[derive(Debug, Parser)]
 #[command(name = "agenvil", version, about)]
@@ -16,6 +18,10 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "DIR")]
     pub root: Option<PathBuf>,
 
+    /// Configuration file [default: <root>/agenvil.toml]
+    #[arg(long, global = true, value_name = "FILE")]
+    pub config: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -23,17 +29,35 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Validate the source tree (read-only, offline)
-    Check,
+    Check {
+        /// Run only the rules that need no subprocess and no slow work
+        #[arg(long)]
+        fast: bool,
+        #[arg(long, value_enum, default_value_t = CheckFormat::Human)]
+        format: CheckFormat,
+        /// Run only these rule IDs (comma-separated)
+        #[arg(long, value_delimiter = ',', value_name = "IDS")]
+        only: Vec<String>,
+        /// Do not run these rule IDs (comma-separated)
+        #[arg(long, value_delimiter = ',', value_name = "IDS")]
+        skip: Vec<String>,
+        /// Lowest severity that makes the exit code 1
+        #[arg(long, value_enum, default_value_t = FailOn::Error)]
+        fail_on: FailOn,
+        /// Human format: print findings only, without fix hints or the summary
+        #[arg(long)]
+        quiet: bool,
+    },
     /// List the discovered source resources (read-only, offline)
     Inventory {
         #[arg(long, value_enum, default_value_t = Format::Json)]
         format: Format,
     },
-    /// List the validation rules (read-only)
+    /// List the validation rules (read-only, needs no config)
     Rules,
-    /// Explain one finding ID (read-only)
+    /// Explain one rule ID (read-only, needs no config)
     Explain {
-        /// Stable finding ID
+        /// Stable rule ID, for example AG001
         id: String,
     },
     /// Build staged output; never touches ~/.claude (mutating)
@@ -45,10 +69,32 @@ pub enum Format {
     Json,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum CheckFormat {
+    Human,
+    Json,
+    Github,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum FailOn {
+    Error,
+    Warning,
+}
+
+impl FailOn {
+    fn reached_by(self, severity: Severity) -> bool {
+        match self {
+            Self::Error => severity == Severity::Error,
+            Self::Warning => true,
+        }
+    }
+}
+
 impl Command {
     fn name(&self) -> &'static str {
         match self {
-            Self::Check => "check",
+            Self::Check { .. } => "check",
             Self::Inventory { .. } => "inventory",
             Self::Rules => "rules",
             Self::Explain { .. } => "explain",
@@ -65,18 +111,38 @@ enum Error {
     NotImplemented(&'static str),
     #[error(transparent)]
     Overlap(#[from] OverlapError),
-    #[error("could not serialize the inventory: {0}")]
+    #[error(transparent)]
+    Settings(#[from] SettingsError),
+    #[error("unknown rule ID `{0}` (run `agenvil rules` to list the IDs)")]
+    UnknownRule(String),
+    #[error("could not serialize the output: {0}")]
     Serialize(#[from] serde_json::Error),
-    /// The inventory was printed, but problems mean it is incomplete.
-    #[error("{0} problem(s) found; the inventory above is incomplete")]
+    /// Output was printed, but problems mean it is incomplete.
+    #[error("{0} problem(s) found; the result above is incomplete")]
     Incomplete(usize),
+    /// Selected rules that have no implementation.
+    #[error(
+        "cannot verify {}: not implemented, so the result is incomplete; to check only the \
+         implemented rules, pass `--skip {}` or set them to \"off\" under [rules] in agenvil.toml",
+        .0.join(", "),
+        .0.join(",")
+    )]
+    Unavailable(Vec<&'static str>),
+    /// Findings at or above the `--fail-on` threshold; already printed.
+    #[error("{0} finding(s) at or above the `--fail-on` level")]
+    Findings(usize),
 }
 
 impl Error {
     fn exit(&self) -> Exit {
         match self {
-            Self::Config(_) | Self::Overlap(_) => Exit::Usage,
-            Self::NotImplemented(_) | Self::Incomplete(_) => Exit::Unverifiable,
+            Self::Config(_) | Self::Overlap(_) | Self::Settings(_) | Self::UnknownRule(_) => {
+                Exit::Usage
+            }
+            Self::NotImplemented(_) | Self::Incomplete(_) | Self::Unavailable(_) => {
+                Exit::Unverifiable
+            }
+            Self::Findings(_) => Exit::Findings,
             Self::Serialize(_) => Exit::Internal,
         }
     }
@@ -95,8 +161,24 @@ pub fn run(cli: &Cli) -> Exit {
 
 fn execute(cli: &Cli) -> Result<(), Error> {
     let root = cli.root.as_deref().unwrap_or(Path::new("."));
+    match &cli.command {
+        // These describe the built-in catalog, so they work without a project.
+        Command::Rules => {
+            print!("{}", rules_table());
+            return Ok(());
+        }
+        Command::Explain { id } => {
+            let rule = validate::find(id).ok_or_else(|| Error::UnknownRule(id.clone()))?;
+            print!("{}", explain(rule));
+            return Ok(());
+        }
+        _ => {}
+    }
     // Load first so a broken config is never mistaken for a clean or merely unimplemented run.
-    let config = Config::load(root)?;
+    let config = match &cli.config {
+        Some(path) => Config::load_file(path)?,
+        None => Config::load(root)?,
+    };
     match &cli.command {
         Command::Inventory {
             format: Format::Json,
@@ -109,9 +191,96 @@ fn execute(cli: &Cli) -> Result<(), Error> {
                 n => Err(Error::Incomplete(n)),
             }
         }
+        Command::Check {
+            fast,
+            format,
+            only,
+            skip,
+            fail_on,
+            quiet,
+        } => {
+            let options = Options {
+                only,
+                skip,
+                fast: *fast,
+            };
+            let plan = Plan::new(&config, &options)?;
+            let inventory = Inventory::build(root, &config, &Limits::default())?;
+            let outcome = validate::run(root, &config, &inventory, &plan);
+            let findings = &outcome.findings;
+            match format {
+                CheckFormat::Human => print!("{}", report::human(findings, *quiet)),
+                CheckFormat::Json => print!("{}", report::json(findings)?),
+                CheckFormat::Github => print!("{}", report::github(findings)),
+            }
+            eprint!("{}", report::problems(&outcome.problems));
+            // No verdict beats any finding: an incomplete run must not look like a clean or a
+            // merely failing one.
+            if !plan.unavailable.is_empty() {
+                return Err(Error::Unavailable(plan.unavailable));
+            }
+            if !outcome.problems.is_empty() {
+                return Err(Error::Incomplete(outcome.problems.len()));
+            }
+            match findings
+                .iter()
+                .filter(|f| fail_on.reached_by(f.severity))
+                .count()
+            {
+                0 => Ok(()),
+                n => Err(Error::Findings(n)),
+            }
+        }
         // Not implemented yet; none may claim success.
         command => Err(Error::NotImplemented(command.name())),
     }
+}
+
+fn status(rule: &validate::Rule) -> &'static str {
+    match rule.check {
+        Check::Run(_) => "implemented",
+        Check::Deferred(_) => "deferred",
+    }
+}
+
+fn rules_table() -> String {
+    let mut out = String::from("ID     SEVERITY  FAST  STATUS       SUMMARY\n");
+    for rule in validate::CATALOG {
+        out.push_str(&format!(
+            "{:<6} {:<9} {:<5} {:<12} {}\n",
+            rule.id,
+            rule.severity.as_str(),
+            if rule.fast { "yes" } else { "no" },
+            status(rule),
+            rule.summary
+        ));
+    }
+    out
+}
+
+fn explain(rule: &validate::Rule) -> String {
+    let mut out = format!(
+        "{}  {}  ({})\n\n{}\n",
+        rule.id,
+        rule.severity.as_str(),
+        status(rule),
+        rule.summary
+    );
+    if let Check::Deferred(why) = rule.check {
+        out.push_str(&format!("\nNot checked: {why}\n"));
+    }
+    out.push_str(&format!("\nWhy: {}\n", rule.rationale));
+    if !rule.fail.is_empty() {
+        out.push_str(&format!("\nFails: {}\nPasses: {}\n", rule.fail, rule.pass));
+    }
+    if !rule.fix.is_empty() {
+        out.push_str(&format!("\nFix: {}\n", rule.fix));
+    }
+    out.push_str(&format!(
+        "\nIn `check --fast`: {}\n",
+        if rule.fast { "yes" } else { "no" }
+    ));
+    out
 }
 
 #[cfg(test)]
@@ -126,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn config_errors_exit_usage_and_valid_config_is_unverifiable() {
+    fn config_errors_exit_usage_and_deferred_rules_exit_unverifiable() {
         let dir = tempfile::tempdir().unwrap();
         let cli = Cli::parse_from(["agenvil", "--root", dir.path().to_str().unwrap(), "check"]);
         assert_eq!(run(&cli), Exit::Usage);
@@ -136,6 +305,7 @@ mod tests {
             "schema = 1\n[project]\nname = \"x\"\n",
         )
         .unwrap();
+        // The default selection includes deferred rules, so the verdict is incomplete.
         assert_eq!(run(&cli), Exit::Unverifiable);
     }
 }
