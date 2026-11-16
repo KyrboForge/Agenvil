@@ -104,6 +104,7 @@ struct Entry {
     bytes: Vec<u8>,
     transform: Transform,
     /// Executable bit of a skill script (Unix only).
+    #[cfg_attr(not(unix), allow(dead_code))]
     exec: bool,
 }
 
