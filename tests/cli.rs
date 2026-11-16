@@ -415,4 +415,29 @@ mod inventory {
         .unwrap();
         agenvil(&dir).arg("inventory").assert().code(2).stdout("");
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_file_names_are_reported_not_silently_dropped() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        let dir = project(VALID);
+        write(&dir, "agents/ok.md", "x");
+        fs::create_dir(dir.path().join("rules")).unwrap();
+        let bad = OsString::from_vec(b"bad\xff.md".to_vec());
+        // APFS and some other filesystems refuse non-UTF-8 names, so there is nothing to find.
+        if fs::write(dir.path().join("agents").join(&bad), "x").is_err() {
+            return;
+        }
+        fs::write(dir.path().join("rules").join(&bad), "x").unwrap();
+        let inv = run(&dir, 4);
+        assert_eq!(
+            problems(&inv),
+            [
+                ("agents/bad\u{fffd}.md", "invalid-path"),
+                ("rules/bad\u{fffd}.md", "invalid-path"),
+            ]
+        );
+        assert_eq!(inv["agents"].as_array().unwrap().len(), 1);
+    }
 }

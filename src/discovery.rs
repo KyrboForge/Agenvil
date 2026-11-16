@@ -246,7 +246,8 @@ impl Scan<'_> {
                     continue;
                 };
                 let depth = inside.components().count();
-                let name = rel.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+                // Matched as raw bytes so a non-UTF-8 name is still a candidate; `read` reports it.
+                let name = rel.file_name().unwrap_or_default();
                 let (wanted, skill_name) = match (kind, depth) {
                     (Kind::Skill, 1) => {
                         if file_type.is_dir() {
@@ -271,8 +272,9 @@ impl Scan<'_> {
                         skills.insert(skill_dir, true);
                         (true, skill_name)
                     }
-                    (Kind::Agent | Kind::Rule, 1) if name.ends_with(".md") => {
-                        (true, name.strip_suffix(".md").unwrap_or(name).to_owned())
+                    (Kind::Agent | Kind::Rule, 1) if name.as_encoded_bytes().ends_with(b".md") => {
+                        let name = name.to_string_lossy();
+                        (true, name.strip_suffix(".md").unwrap_or(&name).to_owned())
                     }
                     _ => (false, String::new()),
                 };
@@ -344,42 +346,39 @@ impl Scan<'_> {
             );
         }
         let max = self.limits.max_file_bytes;
+        let total = self.limits.max_total_bytes;
+        let remaining = total.saturating_sub(self.total_bytes);
+        let too_large = || format!("larger than the {max}-byte limit");
+        let over_total = || {
+            format!(
+                "reading it would exceed the {total}-byte total limit; the inventory is incomplete"
+            )
+        };
         if meta.len() > max {
-            return self.problem(
-                rel,
-                None,
-                ProblemKind::TooLarge,
-                format!("larger than the {max}-byte limit"),
-            );
+            return self.problem(rel, None, ProblemKind::TooLarge, too_large());
         }
-        if self.total_bytes + meta.len() > self.limits.max_total_bytes {
-            return self.problem(
-                rel,
-                None,
-                ProblemKind::LimitExceeded,
-                format!(
-                    "reading it would exceed the {}-byte total limit; the inventory is incomplete",
-                    self.limits.max_total_bytes
-                ),
-            );
+        if meta.len() > remaining {
+            return self.problem(rel, None, ProblemKind::LimitExceeded, over_total());
         }
 
-        // `take` keeps the bound even if the file grows after the metadata check.
+        // The metadata may be stale (the file can grow after it was taken), so both limits are
+        // enforced again on the bytes actually read, and `take` stops one byte past the tighter one.
         let mut bytes = Vec::new();
-        let read = File::open(self.root.join(rel))
-            .and_then(|file| file.take(max + 1).read_to_end(&mut bytes));
+        let read = File::open(self.root.join(rel)).and_then(|file| {
+            file.take(max.min(remaining).saturating_add(1))
+                .read_to_end(&mut bytes)
+        });
         if let Err(e) = read {
             return self.problem(rel, None, ProblemKind::Unreadable, e.kind().to_string());
         }
-        if bytes.len() as u64 > max {
-            return self.problem(
-                rel,
-                None,
-                ProblemKind::TooLarge,
-                format!("larger than the {max}-byte limit"),
-            );
+        let len = bytes.len() as u64;
+        if len > max {
+            return self.problem(rel, None, ProblemKind::TooLarge, too_large());
         }
-        self.total_bytes += bytes.len() as u64;
+        if len > remaining {
+            return self.problem(rel, None, ProblemKind::LimitExceeded, over_total());
+        }
+        self.total_bytes += len;
         match String::from_utf8(bytes) {
             Ok(source) => self.out.files.push(Found {
                 kind,
@@ -629,6 +628,38 @@ mod tests {
         assert_eq!(d.files.len(), 1);
         assert_eq!(kinds(&d).len(), 1);
         assert_eq!(d.problems[0].kind, ProblemKind::LimitExceeded);
+    }
+
+    #[test]
+    fn limits_hold_when_a_file_grows_after_its_metadata_was_taken() {
+        let dir = tree(&[("agents/a.md", "0123")]);
+        let rel = Path::new("agents/a.md");
+        let stale = fs::metadata(dir.path().join(rel)).unwrap();
+        fs::write(dir.path().join(rel), "0123456789").unwrap();
+        let cases = [
+            (6, 100, Some(ProblemKind::TooLarge)),
+            (100, 6, Some(ProblemKind::LimitExceeded)),
+            (u64::MAX, u64::MAX, None),
+        ];
+        for (max_file_bytes, max_total_bytes, problem) in cases {
+            let limits = Limits {
+                max_file_bytes,
+                max_total_bytes,
+                ..Limits::default()
+            };
+            let mut scan = Scan {
+                root: dir.path(),
+                limits: &limits,
+                total_bytes: 0,
+                out: Discovery::default(),
+            };
+            scan.read(Kind::Agent, "a".to_owned(), rel, false, Ok(stale.clone()));
+            let kinds: Vec<_> = scan.out.problems.iter().map(|p| p.kind).collect();
+            assert_eq!(kinds, Vec::from_iter(problem));
+            let read = if problem.is_some() { 0 } else { 10 };
+            assert_eq!(scan.total_bytes, read);
+            assert_eq!(scan.out.files.len(), usize::from(problem.is_none()));
+        }
     }
 
     #[test]
