@@ -182,9 +182,7 @@ fn walk(dir: &Path, under: &str, depth: usize, state: &mut Scan) -> Result<(), S
         }
         let Some(text) = name.to_str() else {
             let shown = format!("{under}{}", name.to_string_lossy());
-            state
-                .nodes
-                .insert(shown, Node::Unsafe("name is not valid UTF-8".to_owned()));
+            state.nodes.insert(shown, Node::Unsafe(NOT_UTF8.to_owned()));
             continue;
         };
         let rel = format!("{under}{text}");
@@ -412,6 +410,8 @@ fn compare(tree: &Tree, expected: &[Entry]) -> Vec<Finding> {
     findings
 }
 
+const NOT_UTF8: &str = "name is not valid UTF-8";
+
 /// Why `dir` (not empty) may not be replaced by a build, or `None` if it holds only an earlier
 /// Agenvil build: a valid manifest, and every file in the tree listed in it and unmodified.
 /// Files the manifest lists but that are gone are fine.
@@ -446,7 +446,8 @@ pub fn foreign(dir: &Path) -> io::Result<Option<String>> {
             continue;
         }
         match (node, owned.get(path.as_str())) {
-            (Node::Unsafe(what), _) => {
+            // A name that is not UTF-8 can never be listed, so it is simply not Agenvil's.
+            (Node::Unsafe(what), _) if *what != NOT_UTF8 => {
                 return Ok(Some(format!(
                     "`{path}` is a {what}, so the directory is not safe to replace"
                 )));
