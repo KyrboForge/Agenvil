@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "target": "claude",
+  "owner": "agenvil",
+  "generator": {
+    "name": "agenvil",
+    "version": "@VERSION@"
+  },
+  "files": [
+    {
+      "path": ".claude/agents/effort-only.md",
+      "source": "agents/effort-only.md",
+      "sha256": "c2b88ce25534fae1bce4b33975e998fa759893505f37f8f350687b42b2e03ce5",
+      "bytes": 93,
+      "transform": "copy"
+    },
+    {
+      "path": ".claude/agents/full.md",
+      "source": "agents/full.md",
+      "sha256": "360cacee225232df56268e30abf01b8e580f6413c7dcb53bda01081afe62dbb4",
+      "bytes": 91,
+      "transform": "copy"
+    },
+    {
+      "path": ".claude/agents/inherits.md",
+      "source": "agents/inherits.md",
+      "sha256": "04c250e6a30794d1b8fde3ec9d7512920173bdf7e8979408e3bc1d72b0276c62",
+      "bytes": 65,
+      "transform": "copy"
+    },
+    {
+      "path": ".claude/agents/mapped.md",
+      "source": "agents/mapped.md",
+      "sha256": "303c75851b558cc369c329f99de10dcf48ac608d137ce9967a0acf8600a16aff",
+      "bytes": 97,
+      "transform": "model-effort-override"
+    },
+    {
+      "path": ".claude/agents/model-only.md",
+      "source": "agents/model-only.md",
+      "sha256": "21dd78cfd8bead7a1ad34db0617306f44ca3b104bf69c34c031325985c293b33",
+      "bytes": 91,
+      "transform": "copy"
+    },
+    {
+      "path": ".claude/agents/unknown.md",
+      "source": "agents/unknown.md",
+      "sha256": "8432a2807371cf5243cc823a6cf73fc59616df232a92dfc9ea54b872728f2b3d",
+      "bytes": 111,
+      "transform": "copy"
+    }
+  ]
+}

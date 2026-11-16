@@ -4,7 +4,7 @@
 
 > **Status: v0.1, in progress.** Configuration loading, exit codes, `inventory`, `check`, `rules`,
 > `explain` and `build --target claude` are implemented (see [`docs/rules.md`](docs/rules.md) for
-> which rules). Drift checks (`build --check`) and installation are not.
+> which rules). Drift checks (`build --check`) and cleanup are too; installation is not.
 
 ## Commands
 
@@ -14,6 +14,8 @@
 | `agenvil inventory [--format json]` | read-only, offline | list discovered resources as JSON |
 | `agenvil rules` | read-only | list validation rules and their status |
 | `agenvil explain <ID>` | read-only | explain one rule: rationale, failing and passing example, fix |
+| `agenvil build --target claude --check [--out DIR]` | read-only, offline | compare the staging tree with what the sources generate; never creates it ([`docs/build.md`](docs/build.md#drift-checks-build---check)) |
+| `agenvil build --target claude --clean [--apply]` | dry run unless `--apply` | remove stale generated files, only those whose digests still match ([`docs/build.md`](docs/build.md#cleanup---clean)) |
 | `agenvil build --target claude [--out DIR]` | writes `.generated/claude/` | build a Claude-native staging tree from the sources; never installs, never touches `~/.claude` ([`docs/build.md`](docs/build.md)) |
 
 `--root <DIR>` selects the project root; the default is the current directory. The config file is
@@ -26,8 +28,8 @@ outside the root.
 | Code | Meaning |
 | --- | --- |
 | 0 | success |
-| 1 | policy findings at or above `--fail-on` (`check`), or sources `build` cannot turn into valid output |
-| 2 | usage or configuration error, including unknown rule IDs, severities and policy keys, a disabled target or an unsafe `--out` |
+| 1 | policy findings at or above `--fail-on` (`check`), sources `build` cannot turn into valid output, or drift (`build --check`) |
+| 2 | usage or configuration error, including unknown rule IDs, severities and policy keys, a disabled target, an unsafe `--out` or an unsafe generated tree (symlink, escaping manifest path) |
 | 3 | internal error (including panics) |
 | 4 | unable to verify: a rule that is not implemented yet, or an inventory that is incomplete because of [problems](#problems); wins over `1` |
 
@@ -178,7 +180,7 @@ third-party actions to commit SHAs. Pull requests only restore the Cargo cache; 
 
 | Job | Runs on | Commands |
 | --- | --- | --- |
-| `test` | Ubuntu, macOS, Windows (stable Rust) | `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets -- -D warnings`, `cargo test --locked --all-targets` (includes the golden and fixture compatibility suites, also run as named steps), `cargo build --locked` |
+| `test` | Ubuntu, macOS, Windows (stable Rust) | `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets -- -D warnings`, `cargo test --locked --all-targets` (includes the golden, fixture compatibility and build end-to-end suites, also run as named steps), `cargo build --locked` |
 | `audit` | Ubuntu | `cargo audit --deny warnings` (cargo-audit 0.22.2, public RustSec database) |
 | `msrv` | Ubuntu, Rust from `rust-version` in `Cargo.toml` | `cargo build --locked`, `cargo test --locked --all-targets` |
 
@@ -192,6 +194,24 @@ cargo test --locked --all-targets
 cargo build --locked
 cargo +1.89 test --locked --all-targets   # MSRV; needs `rustup toolchain install 1.89`
 ```
+
+### Build goldens and the drift flow
+
+`tests/fixtures/build/<case>/` are synthetic standalone projects (no TAK, no private data) and
+`tests/golden-build/<case>/` the exact staging trees they must produce: paths, bytes, manifest
+(the generator version is stored as `@VERSION@`), sha256, order and transforms. `tests/build_golden.rs`
+runs the CI flow on every OS: build into a temp dir, validate the generated tree, compare with the
+golden, `build --check` passes, mutate a generated file, `build --check` fails, and the tree is
+unchanged. `tests/stage.rs` holds the adversarial cases (forged manifests, symlinks, foreign
+files, cleanup safety, scan limits).
+
+```sh
+cargo test --test build_golden --test stage
+AGENVIL_BLESS=1 cargo test --test build_golden goldens_match   # intentional update, then review the diff
+```
+
+Blessing is refused when `CI` is set and never happens implicitly; `--check` never rewrites a
+golden.
 
 ### Testing and compatibility
 

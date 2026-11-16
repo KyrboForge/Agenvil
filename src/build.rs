@@ -13,25 +13,21 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use crate::config::Config;
 use crate::diagnostics::{Exit, Problem, ProblemKind};
 use crate::discovery::Limits;
 use crate::frontmatter;
 use crate::inventory::{Inventory, Resource};
+use crate::manifest::{self, Manifest, Transform};
 use crate::report;
+use crate::stage;
 use crate::target::{self, Resolution, Via};
 
-/// Version of `manifest.json`. Bumped on any breaking change to it.
-pub const MANIFEST_VERSION: u32 = 1;
-pub const MANIFEST_FILE: &str = "manifest.json";
+pub use crate::manifest::{FILE as MANIFEST_FILE, VERSION as MANIFEST_VERSION};
 /// Default output directory, relative to the project root. Git-ignored by convention.
 pub const DEFAULT_OUT: &str = ".generated/claude";
-const OWNER: &str = "agenvil";
-const TARGET: &str = "claude";
 /// Claude Code preloads at most this many skills into one agent.
 const MAX_PRELOADED_SKILLS: usize = 32;
 const MAX_DEPTH: usize = 16;
@@ -63,6 +59,10 @@ pub enum Error {
     Incomplete(Vec<Problem>),
     #[error("cannot build, the sources are invalid:\n{}", list(.0))]
     Invalid(Vec<Issue>),
+    #[error("the generated tree failed validation, nothing was written:\n{}", list(.0))]
+    Output(Vec<Issue>),
+    #[error("cannot verify the staging tree: {0}")]
+    Unverifiable(String),
     #[error("could not write the output: {0}")]
     Io(#[from] io::Error),
 }
@@ -79,73 +79,25 @@ impl Error {
     pub fn exit(&self) -> Exit {
         match self {
             Self::Disabled | Self::Out(..) => Exit::Usage,
-            Self::Incomplete(_) => Exit::Unverifiable,
-            Self::Invalid(_) => Exit::Findings,
+            Self::Incomplete(_) | Self::Unverifiable(_) => Exit::Unverifiable,
+            Self::Invalid(_) | Self::Output(_) => Exit::Findings,
             Self::Io(_) => Exit::Internal,
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-enum Transform {
-    /// Byte for byte.
-    Copy,
-    /// `model` and `effort` lines rewritten to the pair of an explicit target mapping.
-    ModelEffortOverride,
-}
-
-/// One file of the staging tree.
-struct Entry {
+/// One file of the expected staging tree: what a build writes and `build --check` compares to.
+#[derive(Debug)]
+pub struct Entry {
     /// `/`-separated, relative to the output directory.
-    path: String,
+    pub path: String,
     /// Relative to the project root.
-    source: String,
-    bytes: Vec<u8>,
-    transform: Transform,
+    pub source: String,
+    pub bytes: Vec<u8>,
+    pub transform: Transform,
     /// Executable bit of a skill script (Unix only).
     #[cfg_attr(not(unix), allow(dead_code))]
-    exec: bool,
-}
-
-#[derive(Serialize)]
-struct Manifest<'a> {
-    schema: u32,
-    target: &'static str,
-    /// Every file listed below belongs to Agenvil; `manifest.json` itself is not listed.
-    owner: &'static str,
-    generator: Generator,
-    files: Vec<ManifestFile<'a>>,
-}
-
-#[derive(Serialize)]
-struct Generator {
-    name: &'static str,
-    version: &'static str,
-}
-
-#[derive(Serialize)]
-struct ManifestFile<'a> {
-    path: &'a str,
-    source: &'a str,
-    sha256: String,
-    bytes: usize,
-    transform: Transform,
-}
-
-/// What an earlier build left behind, as far as ownership goes.
-#[derive(Deserialize)]
-struct OldManifest {
-    target: String,
-    owner: String,
-    files: Vec<OldFile>,
-}
-
-#[derive(Deserialize)]
-struct OldFile {
-    path: String,
-    sha256: String,
-    bytes: u64,
+    pub exec: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -168,10 +120,7 @@ pub fn claude(
         return Err(Error::Disabled);
     }
     check_out(root, config, out)?;
-    if !inventory.problems.is_empty() {
-        return Err(Error::Incomplete(inventory.problems.clone()));
-    }
-    let entries = plan(root, config, inventory)?;
+    let entries = expected(root, config, inventory)?;
     publish(out, &entries)?;
     Ok(Summary {
         out: out.to_path_buf(),
@@ -180,6 +129,34 @@ pub fn claude(
         rules: inventory.rules.len(),
         files: entries.len(),
     })
+}
+
+/// The files a build would write, sorted by path. The one place the expected tree is computed:
+/// a build writes it, `build --check` and cleanup compare against it.
+pub fn expected(root: &Path, config: &Config, inventory: &Inventory) -> Result<Vec<Entry>, Error> {
+    if !config.targets.claude.enabled {
+        return Err(Error::Disabled);
+    }
+    if !inventory.problems.is_empty() {
+        return Err(Error::Incomplete(inventory.problems.clone()));
+    }
+    plan(root, config, inventory)
+}
+
+/// The manifest of `entries`, files in the order given.
+pub fn manifest_of(entries: &[Entry]) -> Manifest {
+    Manifest::new(
+        entries
+            .iter()
+            .map(|e| manifest::File {
+                path: e.path.clone(),
+                source: e.source.clone(),
+                sha256: manifest::sha256(&e.bytes),
+                bytes: e.bytes.len() as u64,
+                transform: e.transform,
+            })
+            .collect(),
+    )
 }
 
 fn plan(root: &Path, config: &Config, inventory: &Inventory) -> Result<Vec<Entry>, Error> {
@@ -314,6 +291,24 @@ fn plan(root: &Path, config: &Config, inventory: &Inventory) -> Result<Vec<Entry
         problems.sort();
         return Err(Error::Incomplete(problems));
     }
+    for entry in &entries {
+        if let Some((_, why)) = manifest::path_flaw(&entry.path) {
+            issues.push(Issue {
+                path: entry.source.clone(),
+                message: format!("output `{}` is not a portable path: {why}", entry.path),
+            });
+        }
+    }
+    let total: u64 = entries.iter().map(|e| e.bytes.len() as u64).sum();
+    if total > limits.max_total_bytes {
+        issues.push(Issue {
+            path: ".".to_owned(),
+            message: format!(
+                "the output is {total} bytes; the limit is {}",
+                limits.max_total_bytes
+            ),
+        });
+    }
     issues.extend(collisions(
         entries.iter().map(|e| (e.path.as_str(), e.source.as_str())),
     ));
@@ -446,8 +441,8 @@ fn rewrite(res: &Resource, target: &[String; 2]) -> Result<String, String> {
 /// Output paths that differ only by case (or a file that is also a directory) would overwrite
 /// each other on macOS and Windows.
 fn collisions<'a>(paths: impl Iterator<Item = (&'a str, &'a str)>) -> Vec<Issue> {
-    // shortcut: plain lowercase, no Unicode normalisation (NFC/NFD) or Windows reserved names;
-    // extend if sources with such names appear.
+    // shortcut: plain lowercase, no Unicode normalisation (NFC/NFD); extend if sources with such
+    // names appear. Windows reserved names are refused separately by `manifest::path_flaw`.
     let mut seen: BTreeMap<String, (String, &str)> = BTreeMap::new();
     let mut issues = Vec::new();
     for (path, source) in paths {
@@ -639,7 +634,18 @@ fn portable_name(name: &str) -> bool {
 }
 
 /// Rejects an output directory that could damage something that is not Agenvil staging output.
-fn check_out(root: &Path, config: &Config, out: &Path) -> Result<(), Error> {
+pub fn check_out(root: &Path, config: &Config, out: &Path) -> Result<(), Error> {
+    if location(root, config, out)?
+        && let Some(why) = foreign(out)?
+    {
+        return Err(Error::Out(out.to_path_buf(), why));
+    }
+    Ok(())
+}
+
+/// Checks where `out` is, not what is in it: read-only commands stop here. `Ok(true)` if it
+/// exists as a directory, `Ok(false)` if it does not exist yet.
+pub fn location(root: &Path, config: &Config, out: &Path) -> Result<bool, Error> {
     let fail = |reason: &str| Error::Out(out.to_path_buf(), reason.to_owned());
     if out.components().any(|c| c == Component::ParentDir) {
         return Err(fail("`..` is not allowed"));
@@ -674,7 +680,7 @@ fn check_out(root: &Path, config: &Config, out: &Path) -> Result<(), Error> {
     }
     let meta = match fs::symlink_metadata(out) {
         Ok(meta) => meta,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(e) => return Err(e.into()),
     };
     if !meta.is_dir() {
@@ -682,10 +688,7 @@ fn check_out(root: &Path, config: &Config, out: &Path) -> Result<(), Error> {
             "it exists and is not a directory (symlinks are not followed)",
         ));
     }
-    match foreign(out)? {
-        None => Ok(()),
-        Some(why) => Err(fail(&why)),
-    }
+    Ok(true)
 }
 
 /// Why `dir` is not safe to replace, or `None` if it is empty or holds only an earlier Agenvil
@@ -694,85 +697,7 @@ fn foreign(dir: &Path) -> io::Result<Option<String>> {
     if fs::read_dir(dir)?.next().is_none() {
         return Ok(None);
     }
-    let no_manifest = || {
-        Ok(Some(
-            "it is not empty and has no Agenvil manifest.json, so it is not safe to replace; choose another --out or remove it yourself".to_owned(),
-        ))
-    };
-    // A FIFO or device named manifest.json must not be opened.
-    if !fs::symlink_metadata(dir.join(MANIFEST_FILE)).is_ok_and(|m| m.is_file()) {
-        return no_manifest();
-    }
-    let old: Option<OldManifest> = File::open(dir.join(MANIFEST_FILE))
-        .ok()
-        .and_then(|f| serde_json::from_reader(f.take(64 * 1024 * 1024)).ok());
-    let Some(old) = old.filter(|m| m.owner == OWNER && m.target == TARGET) else {
-        return no_manifest();
-    };
-    let owned: BTreeMap<String, OldFile> =
-        old.files.into_iter().map(|f| (f.path.clone(), f)).collect();
-    let mut stray = Vec::new();
-    unowned(dir, "", &owned, &mut stray, &mut 0)?;
-    Ok(stray.first().map(|path| {
-        format!(
-            "`{path}` was not written by Agenvil or was changed since, so the directory is not safe to replace"
-        )
-    }))
-}
-
-/// Collects files under `dir` that the old manifest does not list, or whose content no longer
-/// matches it (a hand edit). Symlinks, special files and names that are not UTF-8 count as foreign.
-fn unowned(
-    dir: &Path,
-    under: &str,
-    owned: &BTreeMap<String, OldFile>,
-    stray: &mut Vec<String>,
-    seen: &mut usize,
-) -> io::Result<()> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        *seen += 1;
-        let name = entry.file_name();
-        let path = join(under, &name.to_string_lossy());
-        if *seen > Limits::default().max_entries {
-            stray.push(format!("{path} (too many entries to verify)"));
-            return Ok(());
-        }
-        let kind = entry.file_type()?;
-        if name.to_str().is_none() {
-            stray.push(path);
-        } else if kind.is_dir() {
-            unowned(&entry.path(), &path, owned, stray, seen)?;
-        } else if path == MANIFEST_FILE {
-        } else if !kind.is_file()
-            || !owned
-                .get(&path)
-                .is_some_and(|f| unchanged(&entry.path(), f))
-        {
-            stray.push(path);
-        }
-    }
-    Ok(())
-}
-
-/// Whether the file still has the size and sha256 the old manifest recorded.
-fn unchanged(path: &Path, old: &OldFile) -> bool {
-    if old.bytes > limits().max_file_bytes
-        || fs::metadata(path).map(|m| m.len()).ok() != Some(old.bytes)
-    {
-        return false;
-    }
-    let mut bytes = Vec::new();
-    File::open(path)
-        .and_then(|f| f.take(old.bytes + 1).read_to_end(&mut bytes))
-        .is_ok_and(|_| sha256(&bytes) == old.sha256)
-}
-
-fn sha256(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    stage::foreign(dir)
 }
 
 /// Absolute path with the longest existing prefix canonicalised, so a symlinked parent cannot
@@ -795,35 +720,9 @@ fn resolve(path: &Path) -> io::Result<PathBuf> {
     }
 }
 
-fn manifest(entries: &[Entry]) -> serde_json::Result<String> {
-    let files = entries
-        .iter()
-        .map(|e| ManifestFile {
-            path: &e.path,
-            source: &e.source,
-            sha256: sha256(&e.bytes),
-            bytes: e.bytes.len(),
-            transform: e.transform,
-        })
-        .collect();
-    let manifest = Manifest {
-        schema: MANIFEST_VERSION,
-        target: TARGET,
-        owner: OWNER,
-        generator: Generator {
-            name: "agenvil",
-            version: env!("CARGO_PKG_VERSION"),
-        },
-        files,
-    };
-    let mut json = serde_json::to_string_pretty(&manifest)?;
-    json.push('\n');
-    Ok(json)
-}
-
 /// Writes the tree next to `out` and renames it into place; removes the temp tree on any failure.
 fn publish(out: &Path, entries: &[Entry]) -> Result<(), Error> {
-    let manifest = manifest(entries).map_err(io::Error::from)?;
+    let manifest = manifest_of(entries).to_json().map_err(io::Error::from)?;
     let parent = match out.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
@@ -837,11 +736,29 @@ fn publish(out: &Path, entries: &[Entry]) -> Result<(), Error> {
     fs::create_dir(&tmp)?;
     let written = write_tree(&tmp, entries, &manifest)
         .map_err(Error::from)
+        .and_then(|()| verify_written(&tmp))
         .and_then(|()| replace(out, &tmp, parent, &name, pid));
     if written.is_err() {
         let _ = fs::remove_dir_all(&tmp);
     }
     written
+}
+
+/// The last gate before the swap: what is on disk is a valid generated tree, read back.
+fn verify_written(tmp: &Path) -> Result<(), Error> {
+    let found = stage::validate_dir(tmp)?;
+    if found.is_empty() {
+        return Ok(());
+    }
+    Err(Error::Output(
+        found
+            .into_iter()
+            .map(|f| Issue {
+                path: f.path,
+                message: f.detail,
+            })
+            .collect(),
+    ))
 }
 
 fn write_tree(dir: &Path, entries: &[Entry], manifest: &str) -> io::Result<()> {

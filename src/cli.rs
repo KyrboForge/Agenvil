@@ -10,6 +10,7 @@ use crate::diagnostics::Exit;
 use crate::discovery::{Limits, OverlapError};
 use crate::inventory::Inventory;
 use crate::report;
+use crate::stage;
 use crate::validate::{self, Check, Options, Plan, SettingsError, Severity};
 
 #[derive(Debug, Parser)]
@@ -70,6 +71,15 @@ pub enum Command {
         /// [default: <root>/.generated/claude]
         #[arg(long, value_name = "DIR")]
         out: Option<PathBuf>,
+        /// Compare the staging tree with what a build would write; fully read-only
+        #[arg(long, conflicts_with_all = ["clean", "apply"])]
+        check: bool,
+        /// Remove files an earlier build wrote that are no longer generated; dry run unless --apply
+        #[arg(long)]
+        clean: bool,
+        /// With --clean: really delete the listed files
+        #[arg(long, requires = "clean")]
+        apply: bool,
     },
 }
 
@@ -130,6 +140,12 @@ enum Error {
         .0.join(",")
     )]
     Unavailable(Vec<&'static str>),
+    /// The staging tree differs from the sources; the report was printed.
+    #[error("the staging tree is out of date: {0} finding(s)")]
+    Drift(usize),
+    /// The staging tree holds a symlink, special file or escaping path; the report was printed.
+    #[error("the staging tree is not safe to trust or touch: {0} finding(s)")]
+    UnsafeTree(usize),
     /// Findings at or above the `--fail-on` threshold; already printed.
     #[error("{0} finding(s) at or above the `--fail-on` level")]
     Findings(usize),
@@ -138,12 +154,14 @@ enum Error {
 impl Error {
     fn exit(&self) -> Exit {
         match self {
-            Self::Config(_) | Self::Overlap(_) | Self::Settings(_) | Self::UnknownRule(_) => {
-                Exit::Usage
-            }
+            Self::Config(_)
+            | Self::Overlap(_)
+            | Self::Settings(_)
+            | Self::UnknownRule(_)
+            | Self::UnsafeTree(_) => Exit::Usage,
             Self::Incomplete(_) | Self::Unavailable(_) => Exit::Unverifiable,
             Self::Build(error) => error.exit(),
-            Self::Findings(_) => Exit::Findings,
+            Self::Findings(_) | Self::Drift(_) => Exit::Findings,
             Self::Serialize(_) => Exit::Internal,
         }
     }
@@ -235,9 +253,21 @@ fn execute(cli: &Cli) -> Result<(), Error> {
         Command::Build {
             target: Target::Claude,
             out,
+            check,
+            clean,
+            apply,
         } => {
             let inventory = Inventory::build(root, &config, &build::limits())?;
             let out = out.clone().unwrap_or_else(|| root.join(build::DEFAULT_OUT));
+            if *check || *clean {
+                // The same plan a build writes, held in memory; nothing below creates anything.
+                let expected = build::expected(root, &config, &inventory)?;
+                return if *check {
+                    check_tree(root, &config, &out, &expected)
+                } else {
+                    clean_tree(root, &config, &out, &expected, *apply)
+                };
+            }
             let built = build::claude(root, &config, &inventory, &out)?;
             println!(
                 "built {} agent(s), {} skill(s) and {} rule(s) as {} file(s) in {}\n\
@@ -253,6 +283,54 @@ fn execute(cli: &Cli) -> Result<(), Error> {
         Command::Rules | Command::Explain { .. } => {
             unreachable!("handled before the config is loaded")
         }
+    }
+}
+
+/// Prints the findings, then picks the exit: an unsafe tree is a usage error (2), any other
+/// finding is drift (1).
+fn verdict(out: &Path, findings: &[stage::Finding]) -> Result<(), Error> {
+    print!("{}", stage::report(out, findings));
+    match findings.len() {
+        0 => Ok(()),
+        n if stage::is_unsafe(findings) => Err(Error::UnsafeTree(n)),
+        n => Err(Error::Drift(n)),
+    }
+}
+
+fn check_tree(
+    root: &Path,
+    config: &Config,
+    out: &Path,
+    expected: &[build::Entry],
+) -> Result<(), Error> {
+    verdict(out, &stage::check(root, config, out, expected)?)
+}
+
+fn clean_tree(
+    root: &Path,
+    config: &Config,
+    out: &Path,
+    expected: &[build::Entry],
+    apply: bool,
+) -> Result<(), Error> {
+    match stage::clean(root, config, out, expected, apply)? {
+        Ok(cleanup) => {
+            print!("{}", stage::cleanup_report(out, &cleanup, apply));
+            Ok(())
+        }
+        Err(blockers) => {
+            print!("{}", stage::report(out, &blockers));
+            eprintln!("cleanup blocked: nothing was deleted");
+            verdict_of_blockers(&blockers)
+        }
+    }
+}
+
+fn verdict_of_blockers(blockers: &[stage::Finding]) -> Result<(), Error> {
+    if stage::is_unsafe(blockers) {
+        Err(Error::UnsafeTree(blockers.len()))
+    } else {
+        Err(Error::Drift(blockers.len()))
     }
 }
 

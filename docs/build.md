@@ -89,6 +89,8 @@ parsed again before it is written.
 
 ```
 agenvil build --target claude [--out DIR] [--root DIR] [--config FILE]
+agenvil build --target claude --check [--out DIR]
+agenvil build --target claude --clean [--apply] [--out DIR]
 ```
 
 `--out` defaults to `.generated/claude` under the project root (add `.generated/` to `.gitignore`;
@@ -102,6 +104,85 @@ this repository does). Only `claude` is a supported target, and it must not be d
 | 2 | usage or config error: unknown target, disabled target, unsafe `--out` |
 | 3 | I/O error while writing |
 | 4 | the input is incomplete (an unreadable, oversized, symlinked or non-regular file; see the README's [problems](../README.md#problems)); an incomplete inventory is never a successful build |
+
+## Drift checks (`build --check`)
+
+```
+agenvil build --target claude --check                      # compare .generated/claude
+agenvil build --target claude --check --out ./my-stage     # compare another staging directory
+```
+
+`--check` is **fully read-only**: it never creates the output directory, never writes, renames or
+deletes anything, and never touches a golden snapshot. It loads the config, plans the output in
+memory with the same code a normal build uses (`build::expected`), and compares the plan with the
+existing staging tree. A **missing staging directory is drift**, not an invitation to generate it.
+
+```
+$ agenvil build --target claude --check
+changed          .claude/agents/full.md: 98 bytes, expected 91
+extra            notes.txt: not generated and not in the manifest
+drift: 2 finding(s) in ./.generated/claude
+error: the staging tree is out of date: 2 finding(s)
+$ echo $?
+1
+```
+
+A match prints `ok: <out> matches the sources` and exits `0`. The report is sorted by drift class
+then path, so it is deterministic. Files are compared by size and SHA-256.
+
+| Class | Meaning |
+| --- | --- |
+| `missing` | the plan generates it but it is not on disk (or the whole staging directory is absent) |
+| `changed` | on disk but its size or SHA-256 differs from the plan |
+| `stale` | listed by the previous build's manifest, no longer generated |
+| `extra` | on disk, not generated and not in the manifest: yours, never deleted |
+| `manifest-invalid` | `manifest.json` is absent, unparsable, an unsupported `schema`, an unexpected `owner` or `target`, has duplicate or case-colliding paths, Windows-invalid paths, a file/directory conflict, or sizes that exceed the limits |
+| `unsafe` | a symlink, special file or non-UTF-8 name in the tree, a manifest path that is absolute, contains `..` or leaves the staging root, or an unsafe `--out` |
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | the tree matches |
+| 1 | drift (any class except `unsafe`), or the sources are invalid |
+| 2 | invalid config, or an unsafe state: an unsafe `--out`, or an `unsafe` finding |
+| 3 | internal or filesystem error |
+| 4 | cannot verify: the inputs are incomplete, or the tree exceeds the scan limits (depth 24, 30 000 entries, the build's byte limits) |
+
+**Malformed data is drift (1); an unsafe state is exit 2.** A manifest that is merely wrong (bad
+JSON, duplicate paths, wrong owner) says the tree cannot be trusted but is not dangerous to
+inspect. A symlink, a path that escapes the root or an `--out` that points at personal Claude
+config is something no command should act on, so it gets the usage-error code and blocks cleanup.
+
+### Generated-tree validation
+
+`--check` and every build also validate the staging tree **by itself**, independent of the plan:
+layout (`.claude/agents|skills|rules`), parseable frontmatter, Agent Skills metadata (skill `name`
+equals its directory), supporting files present, agent `skills:` entries that resolve to a
+generated skill, model and effort already resolved to native values, and manifest size/SHA-256
+agreeing with the bytes on disk. Source-only rules (PO001, the deferred legacy rules, policy on
+what an agent may declare) are **not** applied to output: those belong to `agenvil check` on the
+sources. Failures show up as `manifest-invalid`/`changed` or, when the file itself is malformed,
+as `invalid` findings in the report.
+
+## Cleanup (`--clean`)
+
+Removing files the sources no longer generate is **opt-in and a dry run by default**:
+
+```
+$ agenvil build --target claude --clean
+would remove  .claude/agents/inherits.md
+dry run: nothing was changed; pass --apply to do this
+$ agenvil build --target claude --clean --apply
+removed  .claude/agents/inherits.md
+```
+
+Only the staging tree is touched. The candidates are the *stale* set (previous manifest minus the
+current plan). A file is deleted only if it is a regular file whose size and SHA-256 still match
+the manifest, re-verified immediately before each delete. A stale file you modified is *kept* (and
+reported as `kept`); unknown files, symlinks and directories with foreign content are never
+deleted, directories are removed only when cleanup emptied them, and nothing outside `--out` (so
+no `~/.claude` and no HOME data) is ever a candidate. An `unsafe` finding or an untrusted manifest
+**blocks** the whole cleanup with nothing deleted (`cleanup blocked`). The manifest is rewritten
+atomically afterwards. A manifest entry is an ownership claim, never authorization to delete.
 
 ## Output
 
@@ -145,8 +226,8 @@ mode bit is copied.
 `files` is sorted by `path`; paths are relative to the output directory and `/`-separated.
 `sha256` and `bytes` describe the written file, `transform` is `copy` or `model-effort-override`.
 Output is byte-for-byte deterministic: no timestamps, and nothing is injected into the generated
-files. `manifest.json` itself is not listed. Drift detection and cleanup (`build --check`) are
-separate work and read this file.
+files. `manifest.json` itself is not listed. `build --check` and `--clean` read this file, but
+only as a claim: see [Drift checks](#drift-checks-build---check).
 
 ## Ownership and safety
 
@@ -172,5 +253,11 @@ separate work and read this file.
 
 Native-Claude checks are limited to: agent `name`/`description`, unique agent names, the `skills:`
 list, skill name equals directory, model/effort. Claude Code's other frontmatter fields are not
-validated. Not in this command: `build --check`, cleanup of removed sources from an installed copy,
-installation, other targets, a template language, private skill isolation.
+validated. Not in this command: cleanup of an installed copy, installation, other targets, a template
+language, private skill isolation.
+
+Manifest limitations: it is not signed, so anyone who can write the staging directory can forge a
+matching manifest; `--check` stays correct because it compares against the plan, not the manifest,
+but `--clean` only trusts a manifest for the files whose digests still match. Hash and size mean
+modification is detected, not attributed. Mode bits other than the Unix executable bit are not
+tracked.
