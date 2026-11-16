@@ -143,10 +143,13 @@ See [`examples/agenvil.toml`](examples/agenvil.toml); it is parsed by a unit tes
 | `[policy.models.claude] models` | string list | `haiku`, `sonnet`, `opus` | AG002 |
 | `[policy.models.claude] efforts` | string list | `low`, `medium`, `high`, `xhigh` | AG003 |
 | `[policy.models.claude] pairs` | list of `[model, effort]` | the kit's five pairs | AG004 |
+| `[[targets.claude.map]] source, target` | `[model, effort]` pairs | none | explicit override of a source pair; see [`docs/model-policy.md`](docs/model-policy.md) |
 | `[rules] <ID>` | `"error"`, `"warning"`, `"off"` | rule default | severity override |
 | `[[ignore]] rule, path, reason` | strings | none | suppress one rule in one file; `reason` required |
 | `[hygiene] personal_patterns` | regex list | `/Users/`, `~/\.agents/` | HY001 (Rust regex, linear time) |
 
+- The model policy is validated when the file loads (duplicates, pairs outside `models`/`efforts`,
+  unsupported mapping targets): exit `2`.
 - Unknown keys are rejected everywhere, so typos and not-yet-supported options fail loudly.
 - Paths are relative to the project root, non-empty, use `/` as separator and cannot start with
   `/` or contain `..`, `\` or `:`. The same rules apply on every OS, so Windows drive and UNC paths

@@ -16,7 +16,8 @@ bin = "bin"
 [targets.claude]
 enabled = true
 
-# What agents may declare (AG002-AG004).
+# What agents may declare (AG002-AG004). Checked when the file loads: pairs must use the models
+# and efforts listed here.
 [policy.models.claude]
 models = ["haiku", "sonnet", "opus"]
 efforts = ["low", "medium", "high", "xhigh"]
@@ -27,6 +28,12 @@ pairs = [
   ["opus", "high"],
   ["opus", "xhigh"],
 ]
+
+# Explicit overrides of a source pair for the Claude target (docs/model-policy.md). Without an
+# entry a pair is used as is, or rejected when Claude does not support it; nothing falls back.
+# [[targets.claude.map]]
+# source = ["opus", "xhigh"]
+# target = ["opus", "max"]
 
 # Override a rule's severity, or turn it off: "error", "warning" or "off".
 [rules]
