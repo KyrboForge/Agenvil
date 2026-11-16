@@ -45,6 +45,15 @@ pub enum Resolution {
     /// Neither `model` nor `effort` is set (or `model: inherit`): the target inherits both, as
     /// Claude Code documents. There is nothing to map.
     Inherit,
+    /// Only one of `model` and `effort` is set. Claude Code inherits the other one separately;
+    /// Agenvil keeps the set one as is and does not guess the inherited value. Mappings are
+    /// keyed by pairs, so they never apply here.
+    Partial {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        effort: Option<String>,
+    },
     Resolved {
         source: Pair,
         target: Pair,
@@ -128,77 +137,175 @@ pub fn resolve(
     }
 }
 
-/// Native Claude Code frontmatter values, checked against the Claude Code docs (2026-11).
+/// Native Claude Code frontmatter values, from the Claude Code model configuration docs and the
+/// Claude models overview (2026-11).
 pub mod claude_values {
     pub const ALIASES: [&str; 4] = ["haiku", "sonnet", "opus", "fable"];
     pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+    const NO_XHIGH: &[&str] = &["low", "medium", "high", "max"];
+    /// Full model IDs whose effort support is documented, with the levels each accepts. Claude
+    /// Code silently runs an unsupported level as a lower one, so only these are verifiable.
+    pub const MODELS: [(&str, &[&str]); 12] = [
+        ("claude-fable-5-2", &EFFORTS),
+        ("claude-fable-5-1", &EFFORTS),
+        ("claude-fable-5", &EFFORTS),
+        ("claude-opus-5-5", &EFFORTS),
+        ("claude-sonnet-5-5", &EFFORTS),
+        ("claude-haiku-5-5", &EFFORTS),
+        ("claude-opus-5", &EFFORTS),
+        ("claude-sonnet-5", &EFFORTS),
+        ("claude-opus-4-8", &EFFORTS),
+        ("claude-opus-4-7", &EFFORTS),
+        ("claude-opus-4-6", NO_XHIGH),
+        ("claude-sonnet-4-6", NO_XHIGH),
+    ];
 }
 
-/// Whether Claude Code accepts `pair` as frontmatter `model` + `effort`: an alias or a full
-/// `claude-*` model ID, and one of the documented effort levels.
-///
-/// shortcut: which levels a given model supports (e.g. no `xhigh` on Opus/Sonnet 4.6) is not
-/// modelled; aliases move with releases. Pin the pair in the policy, or map it, until Agenvil
-/// carries a model table.
-pub fn claude_supports(pair: &Pair) -> Result<(), String> {
-    let [model, effort] = pair;
+/// Whether `model` is a value Claude Code accepts in frontmatter: an alias or a full `claude-*`
+/// model ID. Says nothing about whether that ID exists or what it supports.
+fn native_model(model: &str) -> Result<(), String> {
     let full_id = model.strip_prefix("claude-").is_some_and(|rest| {
         !rest.is_empty()
             && rest
                 .chars()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '.'))
     });
-    if !claude_values::ALIASES.contains(&model.as_str()) && !full_id {
-        return Err(format!(
+    if claude_values::ALIASES.contains(&model) || full_id {
+        Ok(())
+    } else {
+        Err(format!(
             "`{model}` is not a Claude model alias ({}) or a full `claude-*` model ID",
             claude_values::ALIASES.join(", ")
-        ));
+        ))
     }
-    if !claude_values::EFFORTS.contains(&effort.as_str()) {
-        return Err(format!(
+}
+
+fn native_effort(effort: &str) -> Result<(), String> {
+    if claude_values::EFFORTS.contains(&effort) {
+        Ok(())
+    } else {
+        Err(format!(
             "`{effort}` is not a Claude effort level ({})",
             claude_values::EFFORTS.join(", ")
-        ));
+        ))
     }
-    Ok(())
+}
+
+/// Whether `pair` is literal Claude frontmatter. Sources must be; mapping cannot launder an
+/// invented value (a tier name, another vendor's model) into a Claude one.
+pub fn claude_native(pair: &Pair) -> Result<(), String> {
+    native_model(&pair[0])?;
+    native_effort(&pair[1])
+}
+
+/// The effort levels `model` is documented to support.
+///
+/// shortcut: aliases are taken as resolved on the Anthropic API (every current model accepts
+/// all levels); a provider that resolves `opus` to Opus 4.6 would run `xhigh` as `high`. Pin a
+/// full ID to have it checked; model a per-provider alias table if that becomes common.
+fn claude_efforts(model: &str) -> Result<&'static [&'static str], String> {
+    native_model(model)?;
+    if claude_values::ALIASES.contains(&model) {
+        return Ok(&claude_values::EFFORTS);
+    }
+    claude_values::MODELS
+        .iter()
+        .find(|(id, _)| *id == model)
+        .map(|(_, efforts)| *efforts)
+        .ok_or_else(|| {
+            format!(
+                "`{model}` is not a model ID with documented effort support in this Agenvil version; use an alias or one of: {}",
+                claude_values::MODELS.map(|(id, _)| id).join(", ")
+            )
+        })
+}
+
+/// Whether Claude Code runs `pair` exactly as written: a known model, and an effort level that
+/// model supports (not one Claude Code would silently lower).
+pub fn claude_supports(pair: &Pair) -> Result<(), String> {
+    let [model, effort] = pair;
+    let efforts = claude_efforts(model)?;
+    native_effort(effort)?;
+    if efforts.contains(&effort.as_str()) {
+        Ok(())
+    } else {
+        Err(format!(
+            "`{model}` does not support effort `{effort}` (it supports {}); Claude Code would silently run a lower level",
+            efforts.join(", ")
+        ))
+    }
 }
 
 /// Resolves the `model` and `effort` frontmatter values of one agent or skill for `target =
 /// claude`. Agents and skills go through the same function; neither is required to declare them.
 ///
-/// Both unset (or `model: inherit` alone) means native inheritance. Anything else must be a
-/// complete pair, because a lone value cannot be checked against the pair policy.
+/// The fields are independent, as in Claude Code: an unset (or `null`) field, or `model:
+/// inherit`, is inherited. A complete pair goes through [`resolve`]; a lone value is checked
+/// against the policy's `models` or `efforts` list and kept as is.
 pub fn claude(
     config: &Config,
     model: Option<&Value>,
     effort: Option<&Value>,
 ) -> Result<Resolution, Diagnostic> {
     let text = |field: &str, value: Option<&Value>| match value {
-        None => Ok(None),
+        None | Some(Value::Null) => Ok(None),
         Some(Value::String(s)) => Ok(Some(s.clone())),
         Some(other) => Err(diagnostic(
             "not-a-string",
             format!("`{field}` must be a string, found {other}"),
         )),
     };
-    let (model, effort) = (text("model", model)?, text("effort", effort)?);
-    let (model, effort) = match (model, effort) {
-        (None, None) => return Ok(Resolution::Inherit),
-        (Some(m), None) if m == "inherit" => return Ok(Resolution::Inherit),
-        (Some(m), Some(e)) if m != "inherit" => (m, e),
-        _ => {
-            return Err(diagnostic(
-                "incomplete-pair",
-                "`model` and `effort` must be set together so the pair can be checked against the policy; omit both to inherit".to_owned(),
-            ));
-        }
+    let not_native = |reason| diagnostic("not-native", reason);
+    let model = text("model", model)?.filter(|m| m != "inherit");
+    let effort = text("effort", effort)?;
+    if let Some(m) = &model {
+        native_model(m).map_err(not_native)?;
+    }
+    if let Some(e) = &effort {
+        native_effort(e).map_err(not_native)?;
+    }
+    let policy = &config.policy.models.claude;
+    let not_allowed = |kind: &str, value: &str| {
+        diagnostic(
+            "source-not-allowed",
+            format!(
+                "{kind} `{value}` is not allowed; add it to [policy.models.claude].{kind}s or change the source"
+            ),
+        )
     };
-    resolve(
-        &[model, effort],
-        &config.policy.models.claude.pairs,
-        &config.targets.claude.map,
-        claude_supports,
-    )
+    match (model, effort) {
+        (None, None) => Ok(Resolution::Inherit),
+        (Some(m), Some(e)) => resolve(
+            &[m, e],
+            &policy.pairs,
+            &config.targets.claude.map,
+            claude_supports,
+        ),
+        (Some(m), None) => {
+            if !policy.models.contains(&m) {
+                return Err(not_allowed("model", &m));
+            }
+            claude_efforts(&m).map_err(|reason| {
+                diagnostic(
+                    "unsupported-target",
+                    format!("{reason}; a lone model cannot be mapped, so set `effort` and map the pair, or change the source"),
+                )
+            })?;
+            Ok(Resolution::Partial {
+                model: Some(m),
+                effort: None,
+            })
+        }
+        (None, Some(e)) => {
+            if !policy.efforts.contains(&e) {
+                return Err(not_allowed("effort", &e));
+            }
+            Ok(Resolution::Partial {
+                model: None,
+                effort: Some(e),
+            })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -266,33 +373,65 @@ mod tests {
         );
     }
 
+    const PINNED: &str = "[policy.models.claude]\nmodels = [\"claude-opus-4-6\", \"claude-not-a-real-model\"]\nefforts = [\"high\", \"xhigh\"]\npairs = [[\"claude-opus-4-6\", \"xhigh\"], [\"claude-not-a-real-model\", \"high\"]]\n";
+
     #[test]
     fn allowed_but_unsupported_pair_without_mapping_is_a_missing_mapping() {
-        let config = config(
-            "[policy.models.claude]\nmodels = [\"gpt-x\"]\nefforts = [\"high\"]\npairs = [[\"gpt-x\", \"high\"]]\n",
-        );
-        let error = run(&config, "gpt-x", "high").unwrap_err();
+        let config = config(PINNED);
+        let error = run(&config, "claude-opus-4-6", "xhigh").unwrap_err();
         assert_eq!(error.code, "missing-mapping");
         assert!(
             error
                 .message
-                .contains("`gpt-x` is not a Claude model alias")
+                .contains("`claude-opus-4-6` does not support effort `xhigh`"),
+            "{error}"
+        );
+        let error = run(&config, "claude-not-a-real-model", "high").unwrap_err();
+        assert_eq!(error.code, "missing-mapping");
+        assert!(
+            error.message.contains("documented effort support"),
+            "{error}"
         );
     }
 
     #[test]
-    fn mapping_makes_a_non_native_source_resolvable() {
-        let config = config(
-            "[policy.models.claude]\nmodels = [\"gpt-x\"]\nefforts = [\"high\"]\npairs = [[\"gpt-x\", \"high\"]]\n[[targets.claude.map]]\nsource = [\"gpt-x\", \"high\"]\ntarget = [\"claude-opus-5-5\", \"high\"]\n",
-        );
+    fn mapping_resolves_an_unsupported_native_pair() {
+        let config = config(&format!(
+            "{PINNED}[[targets.claude.map]]\nsource = [\"claude-opus-4-6\", \"xhigh\"]\ntarget = [\"claude-opus-4-6\", \"high\"]\n"
+        ));
         assert_eq!(
-            run(&config, "gpt-x", "high").unwrap(),
+            run(&config, "claude-opus-4-6", "xhigh").unwrap(),
             Resolution::Resolved {
-                source: pair("gpt-x", "high"),
-                target: pair("claude-opus-5-5", "high"),
+                source: pair("claude-opus-4-6", "xhigh"),
+                target: pair("claude-opus-4-6", "high"),
                 via: Via::Override
             }
         );
+    }
+
+    #[test]
+    fn non_native_sources_are_rejected_even_when_allowed() {
+        let config = config(
+            "[policy.models.claude]\nmodels = [\"gpt-x\", \"strong\"]\nefforts = [\"high\", \"deep\"]\npairs = [[\"gpt-x\", \"high\"]]\n",
+        );
+        for (model, effort, needle) in [
+            (
+                Some("gpt-x"),
+                Some("high"),
+                "`gpt-x` is not a Claude model alias",
+            ),
+            (Some("strong"), None, "`strong` is not a Claude model alias"),
+            (None, Some("deep"), "`deep` is not a Claude effort level"),
+        ] {
+            let error = claude(
+                &config,
+                model.map(|m| json!(m)).as_ref(),
+                effort.map(|e| json!(e)).as_ref(),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "not-native");
+            assert!(error.message.contains(needle), "{error}");
+        }
     }
 
     #[test]
@@ -314,36 +453,94 @@ mod tests {
     }
 
     #[test]
-    fn omission_and_inherit_are_native_inheritance() {
+    fn omission_null_and_inherit_are_native_inheritance() {
         let config = config("");
-        assert_eq!(claude(&config, None, None), Ok(Resolution::Inherit));
-        assert_eq!(
-            claude(&config, Some(&json!("inherit")), None),
-            Ok(Resolution::Inherit)
-        );
+        let null = json!(null);
+        let inherit = json!("inherit");
         for (m, e) in [
-            (None, Some(json!("high"))),
-            (Some(json!("opus")), None),
-            (Some(json!("inherit")), Some(json!("high"))),
+            (None, None),
+            (Some(&null), Some(&null)),
+            (Some(&inherit), None),
+            (Some(&inherit), Some(&null)),
         ] {
-            let error = claude(&config, m.as_ref(), e.as_ref()).unwrap_err();
-            assert_eq!(error.code, "incomplete-pair");
+            assert_eq!(
+                claude(&config, m, e),
+                Ok(Resolution::Inherit),
+                "{m:?} {e:?}"
+            );
         }
         let error = claude(&config, Some(&json!(3)), Some(&json!("high"))).unwrap_err();
         assert_eq!(error.code, "not-a-string");
     }
 
     #[test]
-    fn claude_supports_documented_values_only() {
+    fn a_lone_field_is_kept_and_the_other_inherited() {
+        let config = config("");
+        let (sonnet, high) = (json!("sonnet"), json!("high"));
+        let model_only = Resolution::Partial {
+            model: Some("sonnet".to_owned()),
+            effort: None,
+        };
+        let effort_only = Resolution::Partial {
+            model: None,
+            effort: Some("high".to_owned()),
+        };
+        assert_eq!(claude(&config, Some(&sonnet), None), Ok(model_only.clone()));
+        assert_eq!(
+            claude(&config, Some(&sonnet), Some(&json!(null))),
+            Ok(model_only)
+        );
+        assert_eq!(claude(&config, None, Some(&high)), Ok(effort_only.clone()));
+        assert_eq!(
+            claude(&config, Some(&json!("inherit")), Some(&high)),
+            Ok(effort_only)
+        );
+        // A lone value is still held to the policy lists and to what the target supports.
+        assert_eq!(
+            claude(&config, None, Some(&json!("max"))).unwrap_err().code,
+            "source-not-allowed"
+        );
+        let pinned = self::config(PINNED);
+        let error = claude(&pinned, Some(&json!("claude-not-a-real-model")), None).unwrap_err();
+        assert_eq!(error.code, "unsupported-target");
+        assert_eq!(
+            serde_json::to_string(&Resolution::Partial {
+                model: Some("sonnet".to_owned()),
+                effort: None
+            })
+            .unwrap(),
+            r#"{"status":"partial","model":"sonnet"}"#
+        );
+    }
+
+    #[test]
+    fn claude_supports_documented_combinations_only() {
         for model in ["haiku", "sonnet", "opus", "fable", "claude-opus-5-5"] {
             for effort in claude_values::EFFORTS {
                 assert_eq!(claude_supports(&pair(model, effort)), Ok(()));
             }
         }
-        for model in ["inherit", "Opus", "claude-", "claude-Opus", "gpt-5", ""] {
+        for model in ["claude-opus-4-6", "claude-sonnet-4-6"] {
+            assert_eq!(claude_supports(&pair(model, "max")), Ok(()));
+            assert!(claude_supports(&pair(model, "xhigh")).is_err(), "{model}");
+        }
+        for model in [
+            "inherit",
+            "Opus",
+            "claude-",
+            "claude-Opus",
+            "claude-not-a-real-model",
+            "gpt-5",
+            "",
+        ] {
             assert!(claude_supports(&pair(model, "high")).is_err(), "{model}");
         }
         assert!(claude_supports(&pair("opus", "ultra")).is_err());
+        // Native shape is a separate, weaker check: it is what sources need.
+        assert_eq!(
+            claude_native(&pair("claude-not-a-real-model", "xhigh")),
+            Ok(())
+        );
     }
 
     #[test]

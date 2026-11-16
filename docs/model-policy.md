@@ -10,7 +10,8 @@ Checked against the Claude Code docs (sub-agents, skills, model configuration), 
 
 - Agents: `name` and `description` are required; `model` and `effort` are optional. `model` is an
   alias (`haiku`, `sonnet`, `opus`, `fable`), a full ID such as `claude-opus-5-5`, or `inherit`.
-  Omitting it inherits the conversation's model. `effort` is `low`, `medium`, `high`, `xhigh` or
+  Omitting it inherits the conversation's model. The two fields are independent: each one that is
+  omitted (or empty) is inherited on its own. `effort` is `low`, `medium`, `high`, `xhigh` or
   `max`; which levels apply depends on the model (for example Opus 4.6 and Sonnet 4.6 have no
   `xhigh`).
 - Skills: `model` and `effort` are **Claude extensions**, optional, and not part of the
@@ -34,8 +35,9 @@ pairs   = [["sonnet", "medium"], ["opus", "high"], ["opus", "xhigh"]]
 `pairs` is the allowlist of `(model, effort)` combinations a source may declare (AG002-AG004
 report violations). `agenvil.toml` is rejected with exit `2`, every problem listed, when `models` or
 `efforts` have empty or duplicate values, or when `pairs` has duplicates or uses a model or effort
-that is not in `models`/`efforts`. The policy values are free strings; whether the target supports
-them is decided when resolving.
+that is not in `models`/`efforts`. The policy values are free strings (legacy configs may hold
+non-Claude names); when resolving, a source value that is not literal Claude frontmatter is
+`not-native`, whatever the policy says.
 
 ## Target resolution
 
@@ -49,8 +51,13 @@ target = ["opus", "max"]
 
 | Source | Result |
 | --- | --- |
-| no `model` and no `effort`, or `model: inherit` alone | `inherit`, nothing to map |
-| only one of them (or `inherit` with an `effort`) | `incomplete-pair` |
+| `model` or `effort` not a string | `not-a-string` |
+| a value that is not an alias, a `claude-*` ID or an effort level | `not-native` |
+| no `model` and no `effort` (omitted, empty, or `model: inherit`) | `inherit`, nothing to map |
+| only `model` (in `models`, documented support) | `partial`, model kept, effort inherited |
+| only `effort` (in `efforts`), or `model: inherit` with an `effort` | `partial`, effort kept, model inherited |
+| a lone value not in `models`/`efforts` | `source-not-allowed` |
+| a lone `model` without documented support | `unsupported-target` (maps are keyed by pairs) |
 | pair not in `pairs` | `source-not-allowed` |
 | pair has a `map` entry | `resolved`, `via: override` |
 | pair is natively supported | `resolved`, `via: same` |
@@ -58,14 +65,18 @@ target = ["opus", "max"]
 | `map` entry whose target is not natively supported | `unsupported-target` |
 
 A `map` entry is rejected at load time (exit `2`) if its `source` is not in `pairs`, is listed
-twice, or its `target` is not supported by Claude. There is no fallback: every result is either
+twice or is not native Claude frontmatter, or its `target` is not supported by Claude. There is no fallback: every result is either
 the source pair, an explicitly configured target pair, or a diagnostic with a stable `code`.
 Results serialise as JSON (`{"status":"resolved","source":[..],"target":[..],"via":"override"}`)
 with fixed key order.
 
-"Natively supported" means an alias or a lowercase `claude-*` ID, and one of the five effort
-levels. Per-model effort support is **not** modelled (aliases move with releases); pin the pair or
-map it.
+"Supported" means Claude Code runs the pair exactly as written: an alias, or a full ID in
+`target::claude_values::MODELS` (the documented model/effort table, e.g. `claude-opus-4-6` has no
+`xhigh`), with an effort level that model accepts. A well-formed but unlisted `claude-*` ID cannot
+be verified offline and is not supported; map it to a listed ID or an alias. Aliases are taken as
+resolved on the Anthropic API, where every current model accepts all five levels; a provider that
+resolves an alias to an older model may still lower the effort, so pin a full ID to have it checked.
+A lone `effort` cannot be checked against the inherited model at all.
 
 This is a library API; no CLI command or rule calls it yet. The Claude builder (#10) will.
 

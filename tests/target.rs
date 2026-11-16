@@ -51,6 +51,16 @@ fn project() -> TempDir {
     );
     write(
         &dir,
+        "agents/solo.md",
+        "---\nname: solo\ndescription: Picks a model only\nmodel: sonnet\n---\nBody\n",
+    );
+    write(
+        &dir,
+        "agents/empty.md",
+        "---\nname: empty\ndescription: Empty keys\nmodel:\neffort:\n---\nBody\n",
+    );
+    write(
+        &dir,
         "skills/tdd/SKILL.md",
         "---\nname: tdd\ndescription: Test first\nlicense: MIT\nmetadata:\n  owner: me\n---\nBody\n",
     );
@@ -85,7 +95,9 @@ fn resolves_a_standalone_project_deterministically() {
             ["agents/bare.md", {"status": "inherit"}],
             ["agents/cheap.md", {"code": "source-not-allowed", "message": "haiku/low is not an allowed pair; add it to [policy.models.claude].pairs or change the source"}],
             ["agents/deep.md", {"status": "resolved", "source": ["opus", "xhigh"], "target": ["opus", "max"], "via": "override"}],
+            ["agents/empty.md", {"status": "inherit"}],
             ["agents/planner.md", {"status": "resolved", "source": ["opus", "high"], "target": ["opus", "high"], "via": "same"}],
+            ["agents/solo.md", {"status": "partial", "model": "sonnet"}],
             ["agents/writer.md", {"status": "resolved", "source": ["sonnet", "medium"], "target": ["sonnet", "medium"], "via": "same"}],
             // A standard SKILL.md declares neither field and is not asked to.
             ["skills/tdd/SKILL.md", {"status": "inherit"}],

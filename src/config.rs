@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::target::{PairMap, claude_supports};
+use crate::target::{PairMap, claude_native, claude_supports};
 
 /// Config file name, looked up directly under the project root.
 pub const FILE_NAME: &str = "agenvil.toml";
@@ -337,6 +337,11 @@ impl Config {
                 ));
             }
             sources.push(&entry.source);
+            if let Err(reason) = claude_native(&entry.source) {
+                problems.push(format!(
+                    "[[targets.claude.map]]: source {model}/{effort} is not native Claude frontmatter: {reason}"
+                ));
+            }
             if let Err(reason) = claude_supports(&entry.target) {
                 problems.push(format!(
                     "[[targets.claude.map]]: target {}/{} for source {model}/{effort} is not supported: {reason}",
@@ -427,6 +432,17 @@ mod tests {
             "source opus/max is not in [policy.models.claude].pairs",
             "source opus/high is mapped twice",
             "`ultra` is not a Claude effort level",
+        ] {
+            assert!(message.contains(needle), "{needle}\n{message}");
+        }
+        // Sources must be native; targets must be verifiably supported, not merely well formed.
+        let message = err(&format!(
+            "{MINIMAL}[policy.models.claude]\nmodels = [\"gpt-x\", \"opus\"]\nefforts = [\"high\", \"xhigh\"]\npairs = [[\"gpt-x\", \"high\"], [\"opus\", \"xhigh\"], [\"opus\", \"high\"]]\n[[targets.claude.map]]\nsource = [\"gpt-x\", \"high\"]\ntarget = [\"opus\", \"high\"]\n[[targets.claude.map]]\nsource = [\"opus\", \"xhigh\"]\ntarget = [\"claude-opus-4-6\", \"xhigh\"]\n[[targets.claude.map]]\nsource = [\"opus\", \"high\"]\ntarget = [\"claude-not-a-real-model\", \"high\"]\n"
+        ));
+        for needle in [
+            "source gpt-x/high is not native Claude frontmatter",
+            "`claude-opus-4-6` does not support effort `xhigh`",
+            "`claude-not-a-real-model` is not a model ID with documented effort support",
         ] {
             assert!(message.contains(needle), "{needle}\n{message}");
         }
