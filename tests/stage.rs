@@ -493,3 +493,29 @@ fn personal_claude_config_is_never_touched() {
     p.check().code(0);
     assert_eq!(fs::read(claude.join("mine.md")).unwrap(), b"mine");
 }
+
+#[cfg(unix)]
+#[test]
+fn a_script_that_lost_its_executable_bit_is_changed() {
+    use std::os::unix::fs::PermissionsExt;
+    let p = Project::built();
+    p.write("skills/s/SKILL.md", b"---\nname: s\ndescription: S.\n---\n");
+    p.write("skills/s/run.sh", b"#!/bin/sh\n");
+    fs::set_permissions(p.path("skills/s/run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+    p.run(&[], None).success();
+    p.check().success();
+    let script = p.out().join(".claude/skills/s/run.sh");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o644)).unwrap();
+    p.check_is_read_only()
+        .code(1)
+        .stdout(predicate::str::contains("changed").and(predicate::str::contains("executable")));
+}
+
+#[test]
+fn non_ascii_names_are_legal_and_never_panic() {
+    let p = Project::built();
+    p.write("skills/s/SKILL.md", b"---\nname: s\ndescription: S.\n---\n");
+    p.write("skills/s/a€.md", b"euro");
+    p.run(&[], None).success();
+    p.check().success();
+}

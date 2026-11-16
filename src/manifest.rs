@@ -262,8 +262,8 @@ pub fn path_flaw(path: &str) -> Option<(bool, String)> {
             .iter()
             .any(|r| stem.eq_ignore_ascii_case(r))
             || (stem.len() == 4
-                && (stem[..3].eq_ignore_ascii_case("COM")
-                    || stem[..3].eq_ignore_ascii_case("LPT"))
+                && (stem.as_bytes()[..3].eq_ignore_ascii_case(b"COM")
+                    || stem.as_bytes()[..3].eq_ignore_ascii_case(b"LPT"))
                 && stem.as_bytes()[3].is_ascii_digit());
         if reserved {
             return Some((false, format!("`{part}` is a reserved name on Windows")));
@@ -376,6 +376,8 @@ mod tests {
         }
         // Not reserved: the device name only counts as a whole stem.
         assert!(flaws(&[".claude/agents/console.md", ".claude/agents/com10.md"]).is_empty());
+        // Multi-byte stems of byte length 4 must not be sliced mid-character.
+        assert!(flaws(&[".claude/agents/a€.md", ".claude/agents/😀.md"]).is_empty());
     }
 
     #[test]

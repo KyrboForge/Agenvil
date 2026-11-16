@@ -4,7 +4,7 @@
 //! Nothing here follows symlinks, and nothing here writes except [`clean`] with `apply`, which
 //! deletes only files whose digest still matches the manifest that claims them.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -118,6 +118,8 @@ enum Node {
 /// recorded: they hold nothing that could drift.
 struct Tree {
     nodes: BTreeMap<String, Node>,
+    /// Files with an executable bit (Unix only; always empty elsewhere).
+    runnable: BTreeSet<String>,
 }
 
 #[derive(Debug)]
@@ -143,6 +145,7 @@ impl From<ScanError> for Error {
 
 struct Scan {
     nodes: BTreeMap<String, Node>,
+    runnable: BTreeSet<String>,
     entries: usize,
     bytes: u64,
     max_file: u64,
@@ -153,13 +156,17 @@ fn scan(root: &Path) -> Result<Tree, ScanError> {
     let limits = build::limits();
     let mut state = Scan {
         nodes: BTreeMap::new(),
+        runnable: BTreeSet::new(),
         entries: 0,
         bytes: 0,
         max_file: limits.max_file_bytes,
         max_total: limits.max_total_bytes,
     };
     walk(root, "", 0, &mut state)?;
-    Ok(Tree { nodes: state.nodes })
+    Ok(Tree {
+        nodes: state.nodes,
+        runnable: state.runnable,
+    })
 }
 
 fn walk(dir: &Path, under: &str, depth: usize, state: &mut Scan) -> Result<(), ScanError> {
@@ -211,6 +218,11 @@ fn walk(dir: &Path, under: &str, depth: usize, state: &mut Scan) -> Result<(), S
                     .nodes
                     .insert(rel, Node::Unsafe("changed while it was read".to_owned()));
                 continue;
+            }
+            #[cfg(unix)]
+            if std::os::unix::fs::PermissionsExt::mode(&file.metadata()?.permissions()) & 0o111 != 0
+            {
+                state.runnable.insert(rel.clone());
             }
             (&mut file)
                 .take(state.max_file + 1)
@@ -352,6 +364,14 @@ fn compare(tree: &Tree, expected: &[Entry]) -> Vec<Finding> {
                     manifest::sha256(data)
                 ),
             )),
+            // A script the build marks executable must still be (Unix only; a build keeps the bit).
+            Some(Node::File(_)) if cfg!(unix) && entry.exec && !tree.runnable.contains(path) => {
+                findings.push(finding(
+                    Kind::Changed,
+                    path,
+                    "not executable, expected the executable bit",
+                ));
+            }
             Some(Node::File(_)) => {
                 let Some(m) = trusted.as_ref().map(|_| owned.get(path)) else {
                     continue;
@@ -540,6 +560,17 @@ fn apply_cleanup(out: &Path, manifest: &Manifest, cleanup: &Cleanup) -> Result<(
         let target = join(out, path);
         let m = owned[path.as_str()];
         // Checked again right before the delete: the tree may have changed since the scan.
+        // Every ancestor must still be a real directory, or the path could leave `out`.
+        let mut ancestor = out.to_path_buf();
+        for part in path.split('/').take(path.split('/').count() - 1) {
+            ancestor.push(part);
+            if !fs::symlink_metadata(&ancestor)?.file_type().is_dir() {
+                return Err(Error::Out(
+                    out.to_path_buf(),
+                    format!("`{path}` changed during cleanup; nothing more was deleted"),
+                ));
+            }
+        }
         let meta = fs::symlink_metadata(&target)?;
         if !meta.file_type().is_file() || meta.len() != m.bytes {
             return Err(Error::Out(
@@ -563,7 +594,7 @@ fn apply_cleanup(out: &Path, manifest: &Manifest, cleanup: &Cleanup) -> Result<(
             dir = d.parent();
         }
     }
-    let dropped: std::collections::BTreeSet<&str> = cleanup
+    let dropped: BTreeSet<&str> = cleanup
         .remove
         .iter()
         .chain(&cleanup.forget)

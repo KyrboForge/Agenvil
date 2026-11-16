@@ -184,6 +184,12 @@ no `~/.claude` and no HOME data) is ever a candidate. An `unsafe` finding or an 
 **blocks** the whole cleanup with nothing deleted (`cleanup blocked`). The manifest is rewritten
 atomically afterwards. A manifest entry is an ownership claim, never authorization to delete.
 
+Residual race: size, digest and every parent directory are re-checked (no symlink, still a
+directory) immediately before each delete, but the check and the delete are separate system calls
+and Agenvil has no directory-handle (`openat`) traversal. A local attacker who can write the
+staging directory *while* `--clean --apply` runs could still swap a parent for a symlink in that
+window. Do not run cleanup on a staging directory other users can write.
+
 ## Output
 
 ```
@@ -259,5 +265,5 @@ language, private skill isolation.
 Manifest limitations: it is not signed, so anyone who can write the staging directory can forge a
 matching manifest; `--check` stays correct because it compares against the plan, not the manifest,
 but `--clean` only trusts a manifest for the files whose digests still match. Hash and size mean
-modification is detected, not attributed. Mode bits other than the Unix executable bit are not
-tracked.
+modification is detected, not attributed. On Unix a script the build marks executable must keep an
+executable bit (`changed` otherwise); other mode bits are not tracked.
