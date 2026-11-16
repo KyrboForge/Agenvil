@@ -2,22 +2,23 @@
 
 `agenvil` validates and builds AI agent, skill and rule source trees. One Rust binary, one crate.
 
-> **Status: v0.1, in progress.** Configuration loading, exit codes and `inventory` are implemented.
-> `check`, `rules`, `explain` and `build` are not: they load `agenvil.toml` and then exit `4`
-> ("unable to verify") instead of reporting success.
+> **Status: v0.1, in progress.** Configuration loading, exit codes, `inventory`, `check`, `rules`
+> and `explain` are implemented (see [`docs/rules.md`](docs/rules.md) for which rules). `build`
+> is not: it loads `agenvil.toml` and then exits `4` ("unable to verify") instead of reporting
+> success.
 
 ## Commands
 
 | Command | Kind | Purpose |
 | --- | --- | --- |
-| `agenvil check` | read-only, offline | validate the source tree |
+| `agenvil check [--fast] [--format human\|json\|github] [--only IDS] [--skip IDS] [--fail-on error\|warning] [--quiet]` | read-only, offline | validate the source tree |
 | `agenvil inventory [--format json]` | read-only, offline | list discovered resources as JSON |
-| `agenvil rules` | read-only | list validation rules |
-| `agenvil explain <ID>` | read-only | explain one finding ID |
+| `agenvil rules` | read-only | list validation rules and their status |
+| `agenvil explain <ID>` | read-only | explain one rule: rationale, failing and passing example, fix |
 | `agenvil build` | mutating | build staged output (never `~/.claude`) |
 
 `--root <DIR>` selects the project root; the default is the current directory. The config file is
-always `<root>/agenvil.toml` (no search of parent directories). It must be a regular file of at
+`<root>/agenvil.toml` unless `--config <FILE>` overrides it (no search of parent directories). It must be a regular file of at
 most 1 MiB; a symlinked `agenvil.toml` is rejected without being read, so the config cannot point
 outside the root.
 
@@ -26,10 +27,10 @@ outside the root.
 | Code | Meaning |
 | --- | --- |
 | 0 | success |
-| 1 | policy findings |
-| 2 | usage or configuration error |
+| 1 | policy findings at or above `--fail-on` (`check`) |
+| 2 | usage or configuration error, including unknown rule IDs, severities and policy keys |
 | 3 | internal error (including panics) |
-| 4 | unable to verify: a command that is not implemented yet, or an inventory that is incomplete because of [problems](#problems) |
+| 4 | unable to verify: a command or rule that is not implemented yet, or an inventory that is incomplete because of [problems](#problems); wins over `1` |
 
 ## `agenvil inventory`
 
@@ -110,6 +111,19 @@ parses frontmatter only through `frontmatter::parse`. Consumers should treat `Pr
 unusable" and keep policy findings separate. `Frontmatter::metadata` is a
 `serde_json::Map<String, Value>`, so no Claude field is hard-coded in a schema.
 
+## `agenvil check`
+
+Runs the [rules](docs/rules.md) over the inventory and prints findings (`id`, `severity`, `path`,
+`line`, `column`, `message`, `fix`) in a deterministic order. `--format json` prints
+`{"schema":1,"findings":[…],"summary":{"errors":0,"warnings":0}}`; `github` prints workflow
+annotations. Input problems (malformed frontmatter, symlinks, size limits, a missing `POLICY.md`)
+go to stderr and exit `4`: they are never reported as policy violations or as a pass. Rules that
+are not implemented yet are listed on stderr as "not checked".
+
+`--fast` is offline: no subprocess, no network, no writes, and no script from the tree is ever
+executed. It excludes SK002 and the (deferred) CF003, which needs git. `check` never modifies the
+project or HOME.
+
 ## `agenvil.toml` schema (version 1)
 
 See [`examples/agenvil.toml`](examples/agenvil.toml); it is parsed by a unit test.
@@ -121,8 +135,16 @@ See [`examples/agenvil.toml`](examples/agenvil.toml); it is parsed by a unit tes
 | `[paths] agents` | path | `"agents"` | `agents/*.md` |
 | `[paths] skills` | path | `"skills"` | `skills/*/SKILL.md` |
 | `[paths] rules` | path | `"rules"` | `rules/*.md` |
+| `[paths] policy` | path | `"POLICY.md"` | file with the model table (PO001) |
+| `[paths] defaults` | path | `"config/defaults.toml"` | validated by CF001 when present |
+| `[paths] bin` | path | `"bin"` | scripts checked by HY002 when present |
 | `[targets.claude] enabled` | bool | `true` | the only target in v0.1 |
-| `[policy.models.claude]` | table | empty | accepted but has no keys yet |
+| `[policy.models.claude] models` | string list | `haiku`, `sonnet`, `opus` | AG002 |
+| `[policy.models.claude] efforts` | string list | `low`, `medium`, `high`, `xhigh` | AG003 |
+| `[policy.models.claude] pairs` | list of `[model, effort]` | the kit's five pairs | AG004 |
+| `[rules] <ID>` | `"error"`, `"warning"`, `"off"` | rule default | severity override |
+| `[[ignore]] rule, path, reason` | strings | none | suppress one rule in one file; `reason` required |
+| `[hygiene] personal_patterns` | regex list | `/Users/`, `~/\.agents/` | HY001 (Rust regex, linear time) |
 
 - Unknown keys are rejected everywhere, so typos and not-yet-supported options fail loudly.
 - Paths are relative to the project root, non-empty, use `/` as separator and cannot start with

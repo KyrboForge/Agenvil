@@ -48,6 +48,8 @@ pub enum ProblemKind {
     LimitExceeded,
     /// Malformed YAML frontmatter.
     Frontmatter,
+    /// A file a selected rule needs does not exist.
+    Missing,
 }
 
 /// Something wrong with one input file, located by a path relative to the project root.

@@ -5,16 +5,8 @@ use predicates::prelude::*;
 use tempfile::TempDir;
 
 const VALID: &str = "schema = 1\n[project]\nname = \"demo\"\n";
-const SUBCOMMANDS: [&[&str]; 5] = [
-    &["check"],
-    &["inventory"],
-    &["rules"],
-    &["explain", "SOME-ID"],
-    &["build"],
-];
-
-/// Commands that still report "not implemented" (`inventory` is real now).
-const UNIMPLEMENTED: [&[&str]; 4] = [&["check"], &["rules"], &["explain", "SOME-ID"], &["build"]];
+/// Commands that read the project config (`rules` and `explain` describe the built-in catalog).
+const PROJECT_COMMANDS: [&[&str]; 3] = [&["check"], &["inventory"], &["build"]];
 
 fn agenvil(cwd: &TempDir) -> Command {
     let mut cmd = Command::cargo_bin("agenvil").unwrap();
@@ -107,7 +99,7 @@ fn invalid_config_exits_2_for_every_command() {
         ),
     ] {
         let dir = project(config);
-        for args in SUBCOMMANDS {
+        for args in PROJECT_COMMANDS {
             agenvil(&dir)
                 .args(args)
                 .assert()
@@ -118,16 +110,34 @@ fn invalid_config_exits_2_for_every_command() {
 }
 
 #[test]
-fn valid_config_is_never_reported_as_clean() {
+fn unimplemented_build_is_never_reported_as_clean() {
     let dir = project(VALID);
-    for args in UNIMPLEMENTED {
-        agenvil(&dir)
-            .args(args)
-            .assert()
-            .code(4)
-            .stdout("")
-            .stderr(predicate::str::contains("not implemented yet"));
-    }
+    agenvil(&dir)
+        .arg("build")
+        .assert()
+        .code(4)
+        .stdout("")
+        .stderr(predicate::str::contains("not implemented yet"));
+}
+
+#[test]
+fn rules_and_explain_need_no_config() {
+    let dir = tempfile::tempdir().unwrap();
+    agenvil(&dir)
+        .arg("rules")
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("AG001").and(predicate::str::contains("deferred")));
+    agenvil(&dir)
+        .args(["explain", "AG004"])
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("AG004").and(predicate::str::contains("pair")));
+    agenvil(&dir)
+        .args(["explain", "NOPE1"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("unknown rule ID `NOPE1`"));
 }
 
 #[test]
@@ -141,25 +151,30 @@ fn root_is_cwd_by_default_or_explicit_from_anywhere() {
         .args(["check", "--root"])
         .arg(proj.path())
         .assert()
-        .code(4);
+        .code(0);
     agenvil(&elsewhere)
         .arg("--root")
         .arg(proj.path())
         .arg("check")
         .assert()
-        .code(4);
+        .code(0);
     // default root is the working directory.
-    agenvil(&proj).arg("check").assert().code(4);
+    agenvil(&proj).arg("check").assert().code(0);
 }
 
 #[test]
 fn commands_leave_the_project_untouched() {
     let dir = project(VALID);
     let before = entries(&dir);
-    for args in UNIMPLEMENTED {
-        agenvil(&dir).args(args).assert().code(4);
+    agenvil(&dir).arg("build").assert().code(4);
+    for args in [
+        &["check"][..],
+        &["inventory"],
+        &["rules"],
+        &["explain", "AG001"],
+    ] {
+        agenvil(&dir).args(args).assert().code(0);
     }
-    agenvil(&dir).arg("inventory").assert().code(0);
     assert_eq!(entries(&dir), before);
 }
 
