@@ -456,10 +456,17 @@ fn unsafe_output_directories_are_refused() {
     p.build_to(Some(claude.to_str().unwrap()))
         .code(2)
         .stderr(predicate::str::contains(
-            "never write inside the Claude configuration",
+            "never write in or around the Claude configuration",
         ));
     p.build_to(Some(p.home.path().join(".claude").to_str().unwrap()))
         .code(2);
+    // HOME itself contains the configuration directory.
+    p.build_to(Some(p.home.path().to_str().unwrap())).code(2);
+    // Inside a source directory the output would be copied into itself.
+    p.build_to(Some("agents/out"))
+        .code(2)
+        .stderr(predicate::str::contains("inside a source directory"));
+    assert!(!p.path("agents/out").exists());
     // The project itself.
     p.build_to(Some(".")).code(2);
     assert!(!p.home.path().join(".claude").exists());
@@ -535,6 +542,76 @@ fn failed_build_leaves_previous_output_and_no_partial_tree() {
     p.write("skills/tdd/SKILL.md", &[0xff, 0xfe, 0x00]);
     p.build().code(4);
     assert_eq!(snapshot(&p.path(".generated")), good);
+}
+
+#[cfg(unix)]
+#[test]
+fn foreign_names_in_an_owned_output_block_replacement() {
+    use std::os::unix::ffi::OsStrExt;
+    let p = Project::new(&[("agents/a.md", b"---\nname: a\ndescription: A.\n---\n")]);
+    p.build().success();
+    // A name that is not UTF-8 can never be listed in the manifest.
+    let odd = std::ffi::OsStr::from_bytes(b"caf\xe9.md");
+    // shortcut: APFS refuses such names, so the test only runs where the file system allows them.
+    if fs::write(p.path(".generated/claude/.claude/agents").join(odd), "mine").is_err() {
+        return;
+    }
+    p.build()
+        .code(2)
+        .stderr(predicate::str::contains("was not written by Agenvil"));
+    assert!(
+        p.path(".generated/claude/.claude/agents")
+            .join(odd)
+            .exists()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_manifest_that_is_not_a_regular_file_is_never_opened() {
+    let p = Project::new(&[("agents/a.md", b"---\nname: a\ndescription: A.\n---\n")]);
+    fs::create_dir_all(p.path("stage")).unwrap();
+    let fifo = p.path("stage/manifest.json");
+    let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+    if !made.is_ok_and(|s| s.success()) {
+        return;
+    }
+    // Opening a FIFO for reading would block forever.
+    p.build_to(Some("stage"))
+        .code(2)
+        .stderr(predicate::str::contains("no Agenvil manifest.json"));
+}
+
+#[test]
+fn entry_names_that_are_not_portable_fail_the_build() {
+    let p = Project::new(&[("agents/a.md", b"---\nname: a\ndescription: A.\n---\n")]);
+    p.write("rules/a:b.md", b"rule\n");
+    p.build().failure();
+    assert!(!p.path(".generated").exists());
+}
+
+#[test]
+fn the_byte_budget_covers_all_skills_together() {
+    let files: Vec<(String, Vec<u8>)> = (0..5)
+        .map(|i| {
+            let body = SKILL.replace("tdd", &format!("s{i}"));
+            (format!("skills/s{i}/SKILL.md"), body.into_bytes())
+        })
+        .collect();
+    let refs: Vec<(&str, &[u8])> = files
+        .iter()
+        .map(|(p, b)| (p.as_str(), b.as_slice()))
+        .collect();
+    let p = Project::new(&refs);
+    // Each file is within the per-file limit; together they exceed the 64 MiB total.
+    for i in 0..5 {
+        let big = fs::File::create(p.path(&format!("skills/s{i}/big.bin"))).unwrap();
+        big.set_len(16 * 1024 * 1024).unwrap();
+    }
+    p.build()
+        .code(4)
+        .stderr(predicate::str::contains("total limit"));
+    assert!(!p.path(".generated").exists());
 }
 
 #[test]

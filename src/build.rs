@@ -165,7 +165,7 @@ pub fn claude(
     if !config.targets.claude.enabled {
         return Err(Error::Disabled);
     }
-    check_out(root, out)?;
+    check_out(root, config, out)?;
     if !inventory.problems.is_empty() {
         return Err(Error::Incomplete(inventory.problems.clone()));
     }
@@ -186,6 +186,20 @@ fn plan(root: &Path, config: &Config, inventory: &Inventory) -> Result<Vec<Entry
     let mut entries = Vec::new();
     let limits = limits();
     let skill_names: BTreeSet<&str> = inventory.skills.iter().map(|s| s.name.as_str()).collect();
+
+    let names = inventory
+        .agents
+        .iter()
+        .chain(&inventory.skills)
+        .chain(&inventory.rules);
+    for res in names {
+        if !portable_name(&res.name) {
+            issues.push(Issue {
+                path: res.path.clone(),
+                message: "the name must not contain `\\`, `:` or control characters".to_owned(),
+            });
+        }
+    }
 
     let mut agent_ids: BTreeMap<String, &str> = BTreeMap::new();
     for agent in &inventory.agents {
@@ -230,6 +244,15 @@ fn plan(root: &Path, config: &Config, inventory: &Inventory) -> Result<Vec<Entry
         }
     }
 
+    // One walk for every skill: the entry and byte budgets cover all skill directories together.
+    let mut walk = Walk {
+        root,
+        limits: &limits,
+        seen: 0,
+        used: 0,
+        files: Vec::new(),
+        problems: Vec::new(),
+    };
     for skill in &inventory.skills {
         let dir = skill.path.rsplit_once('/').map_or("", |(dir, _)| dir);
         let name_field = skill.frontmatter.as_ref().and_then(|f| f.get("name"));
@@ -246,15 +269,7 @@ fn plan(root: &Path, config: &Config, inventory: &Inventory) -> Result<Vec<Entry
             }),
         }
         let prefix = format!(".claude/skills/{}", skill.name);
-        let mut walk = Walk {
-            root,
-            limits: &limits,
-            seen: 0,
-            files: Vec::new(),
-            problems: Vec::new(),
-        };
         walk.dir(dir, "", 0);
-        problems.append(&mut walk.problems);
         let mut skill_md = match resource_entry(config, skill, format!("{prefix}/SKILL.md")) {
             Ok(entry) => Some(entry),
             Err(message) => {
@@ -265,7 +280,7 @@ fn plan(root: &Path, config: &Config, inventory: &Inventory) -> Result<Vec<Entry
                 None
             }
         };
-        for asset in walk.files {
+        for asset in std::mem::take(&mut walk.files) {
             if asset.under == "SKILL.md" {
                 // The checked (and possibly rewritten) copy, not a second read of the file.
                 entries.extend(skill_md.take());
@@ -280,6 +295,8 @@ fn plan(root: &Path, config: &Config, inventory: &Inventory) -> Result<Vec<Entry
             }
         }
     }
+
+    problems.append(&mut walk.problems);
 
     for rule in &inventory.rules {
         entries.push(Entry {
@@ -469,6 +486,8 @@ struct Walk<'a> {
     root: &'a Path,
     limits: &'a Limits,
     seen: usize,
+    /// Bytes read so far, over all skills.
+    used: u64,
     files: Vec<Asset>,
     problems: Vec<Problem>,
 }
@@ -488,17 +507,23 @@ impl Walk<'_> {
         let Ok(read) = fs::read_dir(self.root.join(dir)) else {
             return self.problem(dir, ProblemKind::Unreadable, "could not read directory");
         };
-        let mut names: Vec<_> = read.filter_map(Result::ok).map(|e| e.file_name()).collect();
+        // Never collect more than the budget allows: a huge directory is cut off while reading.
+        let room = self.limits.max_entries.saturating_sub(self.seen);
+        let mut names: Vec<_> = read
+            .filter_map(Result::ok)
+            .map(|e| e.file_name())
+            .take(room + 1)
+            .collect();
+        if names.len() > room {
+            return self.problem(
+                dir,
+                ProblemKind::LimitExceeded,
+                "too many entries in skill directories; the build is incomplete",
+            );
+        }
         names.sort();
         for name in names {
             self.seen += 1;
-            if self.seen > self.limits.max_entries {
-                return self.problem(
-                    dir,
-                    ProblemKind::LimitExceeded,
-                    "too many entries in skill directories; the build is incomplete",
-                );
-            }
             let shown = format!("{dir}/{}", name.to_string_lossy());
             let Some(name) = name.to_str().filter(|n| portable_name(n)) else {
                 self.problem(
@@ -544,8 +569,7 @@ impl Walk<'_> {
     fn file(&mut self, rel: String, below: String, meta: &fs::Metadata) {
         let size = meta.len();
         let (max, total) = (self.limits.max_file_bytes, self.limits.max_total_bytes);
-        let used: u64 = self.files.iter().map(|f| f.bytes.len() as u64).sum();
-        let room = total.saturating_sub(used);
+        let room = total.saturating_sub(self.used);
         if size > max {
             return self.problem(
                 &rel,
@@ -581,6 +605,7 @@ impl Walk<'_> {
         let exec = std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o111 != 0;
         #[cfg(not(unix))]
         let exec = false;
+        self.used += len;
         self.files.push(Asset {
             under: below,
             source: rel,
@@ -603,7 +628,7 @@ fn portable_name(name: &str) -> bool {
 }
 
 /// Rejects an output directory that could damage something that is not Agenvil staging output.
-fn check_out(root: &Path, out: &Path) -> Result<(), Error> {
+fn check_out(root: &Path, config: &Config, out: &Path) -> Result<(), Error> {
     let fail = |reason: &str| Error::Out(out.to_path_buf(), reason.to_owned());
     if out.components().any(|c| c == Component::ParentDir) {
         return Err(fail("`..` is not allowed"));
@@ -616,9 +641,10 @@ fn check_out(root: &Path, out: &Path) -> Result<(), Error> {
         .chain(std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from))
         .filter_map(|p| resolve(&p).ok());
     for dir in forbidden {
-        if wanted.starts_with(&dir) {
+        // Either direction: inside the config directory, or a parent of it (HOME itself).
+        if wanted.starts_with(&dir) || dir.starts_with(&wanted) {
             return Err(fail(
-                "builds are staging only and never write inside the Claude configuration directory",
+                "builds are staging only and never write in or around the Claude configuration directory",
             ));
         }
     }
@@ -626,6 +652,14 @@ fn check_out(root: &Path, out: &Path) -> Result<(), Error> {
         return Err(fail(
             "the project root must not be inside the output directory",
         ));
+    }
+    let paths = &config.paths;
+    for source in [&paths.agents, &paths.skills, &paths.rules] {
+        if wanted.starts_with(resolve(&root.join(source.as_path()))?) {
+            return Err(fail(
+                "the output directory must not be inside a source directory",
+            ));
+        }
     }
     let meta = match fs::symlink_metadata(out) {
         Ok(meta) => meta,
@@ -637,31 +671,44 @@ fn check_out(root: &Path, out: &Path) -> Result<(), Error> {
             "it exists and is not a directory (symlinks are not followed)",
         ));
     }
-    if fs::read_dir(out)?.next().is_none() {
-        return Ok(());
-    }
-    // Replaceable only if an earlier Agenvil build wrote it and nothing else lives there.
-    let old: OldManifest = File::open(out.join(MANIFEST_FILE))
-        .ok()
-        .and_then(|f| serde_json::from_reader(f.take(64 * 1024 * 1024)).ok())
-        .filter(|m: &OldManifest| m.owner == OWNER && m.target == TARGET)
-        .ok_or_else(|| {
-            fail("it is not empty and has no Agenvil manifest.json, so it is not safe to replace; choose another --out or remove it yourself")
-        })?;
-    let mut owned: BTreeSet<String> = old.files.into_iter().map(|f| f.path).collect();
-    owned.insert(MANIFEST_FILE.to_owned());
-    let mut stray = Vec::new();
-    unowned(out, "", &owned, &mut stray, &mut 0)?;
-    match stray.first() {
+    match foreign(out)? {
         None => Ok(()),
-        Some(path) => Err(fail(&format!(
-            "`{path}` was not written by Agenvil, so the directory is not safe to replace"
-        ))),
+        Some(why) => Err(fail(&why)),
     }
 }
 
-/// Collects files under `dir` that the old manifest does not list. Symlinks and special files
-/// count as foreign.
+/// Why `dir` is not safe to replace, or `None` if it is empty or holds only an earlier Agenvil
+/// build: its `manifest.json` has the right owner and target and lists every file in it.
+fn foreign(dir: &Path) -> io::Result<Option<String>> {
+    if fs::read_dir(dir)?.next().is_none() {
+        return Ok(None);
+    }
+    let no_manifest = || {
+        Ok(Some(
+            "it is not empty and has no Agenvil manifest.json, so it is not safe to replace; choose another --out or remove it yourself".to_owned(),
+        ))
+    };
+    // A FIFO or device named manifest.json must not be opened.
+    if !fs::symlink_metadata(dir.join(MANIFEST_FILE)).is_ok_and(|m| m.is_file()) {
+        return no_manifest();
+    }
+    let old: Option<OldManifest> = File::open(dir.join(MANIFEST_FILE))
+        .ok()
+        .and_then(|f| serde_json::from_reader(f.take(64 * 1024 * 1024)).ok());
+    let Some(old) = old.filter(|m| m.owner == OWNER && m.target == TARGET) else {
+        return no_manifest();
+    };
+    let mut owned: BTreeSet<String> = old.files.into_iter().map(|f| f.path).collect();
+    owned.insert(MANIFEST_FILE.to_owned());
+    let mut stray = Vec::new();
+    unowned(dir, "", &owned, &mut stray, &mut 0)?;
+    Ok(stray.first().map(|path| {
+        format!("`{path}` was not written by Agenvil, so the directory is not safe to replace")
+    }))
+}
+
+/// Collects files under `dir` that the old manifest does not list. Symlinks, special files and
+/// names that are not UTF-8 count as foreign.
 fn unowned(
     dir: &Path,
     under: &str,
@@ -672,9 +719,16 @@ fn unowned(
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         *seen += 1;
-        let path = join(under, &entry.file_name().to_string_lossy());
+        let name = entry.file_name();
+        let path = join(under, &name.to_string_lossy());
+        if *seen > Limits::default().max_entries {
+            stray.push(format!("{path} (too many entries to verify)"));
+            return Ok(());
+        }
         let kind = entry.file_type()?;
-        if kind.is_dir() && *seen <= Limits::default().max_entries {
+        if name.to_str().is_none() {
+            stray.push(path);
+        } else if kind.is_dir() {
             unowned(&entry.path(), &path, owned, stray, seen)?;
         } else if !kind.is_file() || !owned.contains(&path) {
             stray.push(path);
@@ -746,12 +800,13 @@ fn publish(out: &Path, entries: &[Entry]) -> Result<(), Error> {
     let pid = std::process::id();
     let tmp = parent.join(format!(".{name}.agenvil-tmp-{pid}"));
     fs::create_dir(&tmp)?;
-    let written =
-        write_tree(&tmp, entries, &manifest).and_then(|()| replace(out, &tmp, parent, &name, pid));
+    let written = write_tree(&tmp, entries, &manifest)
+        .map_err(Error::from)
+        .and_then(|()| replace(out, &tmp, parent, &name, pid));
     if written.is_err() {
         let _ = fs::remove_dir_all(&tmp);
     }
-    Ok(written?)
+    written
 }
 
 fn write_tree(dir: &Path, entries: &[Entry], manifest: &str) -> io::Result<()> {
@@ -778,15 +833,27 @@ fn write_tree(dir: &Path, entries: &[Entry], manifest: &str) -> io::Result<()> {
     fs::write(dir.join(MANIFEST_FILE), manifest)
 }
 
-fn replace(out: &Path, tmp: &Path, parent: &Path, name: &str, pid: u32) -> io::Result<()> {
+fn replace(out: &Path, tmp: &Path, parent: &Path, name: &str, pid: u32) -> Result<(), Error> {
     if fs::symlink_metadata(out).is_err() {
-        return fs::rename(tmp, out);
+        return Ok(fs::rename(tmp, out)?);
     }
     let old = parent.join(format!(".{name}.agenvil-old-{pid}"));
     fs::rename(out, &old)?;
-    if let Err(e) = fs::rename(tmp, out) {
+    // Ownership was checked before the build, but the directory may have changed since. Check
+    // again on the moved copy, where nothing can add to it, before anything is deleted.
+    let checked = foreign(&old)
+        .map_err(Error::from)
+        .and_then(|why| match why {
+            None => Ok(()),
+            Some(why) => Err(Error::Out(out.to_path_buf(), why)),
+        });
+    if let Err(e) = checked {
         let _ = fs::rename(&old, out);
         return Err(e);
+    }
+    if let Err(e) = fs::rename(tmp, out) {
+        let _ = fs::rename(&old, out);
+        return Err(e.into());
     }
     // The new tree is already in place; a leftover backup is only clutter.
     if let Err(e) = fs::remove_dir_all(&old) {
@@ -818,6 +885,20 @@ mod tests {
         let paths: Vec<_> = found.iter().map(|i| i.path.as_str()).collect();
         assert_eq!(paths, ["agents/foo.md", "skills/A/SKILL.md"]);
         assert!(found[0].message.contains("case-insensitive"));
+    }
+
+    #[test]
+    fn replace_rechecks_ownership_after_moving_the_old_output_aside() {
+        let dir = tempfile::tempdir().unwrap();
+        let (out, tmp) = (dir.path().join("out"), dir.path().join("tmp"));
+        fs::create_dir_all(&out).unwrap();
+        fs::create_dir_all(&tmp).unwrap();
+        // The directory became foreign after check_out passed: it has no manifest.
+        fs::write(out.join("notes.txt"), "mine").unwrap();
+        let err = replace(&out, &tmp, dir.path(), "out", 1).unwrap_err();
+        assert!(matches!(err, Error::Out(..)));
+        assert_eq!(fs::read(out.join("notes.txt")).unwrap(), b"mine");
+        assert!(tmp.exists());
     }
 
     #[test]

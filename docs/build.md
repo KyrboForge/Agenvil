@@ -160,8 +160,13 @@ separate work and read this file.
   `manifest.json` has `owner: "agenvil"` and `target: "claude"` and every file in it is listed. A
   file you added, another tool's directory or a non-directory makes the build fail untouched
   (exit 2).
-- `--out` may not contain `..`, point inside `~/.claude`, `$CLAUDE_CONFIG_DIR` or `%USERPROFILE%\.claude`
-  (symlinks resolved), or contain the project root.
+- Ownership is checked again on the old output after it is moved aside, right before anything is
+  deleted, so a directory that changed in between is put back untouched. Names that are not UTF-8
+  and a `manifest.json` that is not a regular file count as foreign.
+- `--out` may not contain `..`, be inside or contain `~/.claude`, `$CLAUDE_CONFIG_DIR` or
+  `%USERPROFILE%\.claude` (so not HOME either; symlinks resolved), contain the project root, or be
+  inside the agents, skills or rules source directories.
+- Skill directories share one budget of entries and bytes (the inventory's total limits).
 
 ## Not covered
 
