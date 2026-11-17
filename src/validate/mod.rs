@@ -136,8 +136,10 @@ impl Plan {
                 ));
             }
         }
+        // `--skip` wins over `--only`, so a skipped rule is never held to `--only` requirements.
+        let kept = || only.iter().filter(|r| !skip.iter().any(|s| s.id == r.id));
         if options.fast {
-            for rule in &only {
+            for rule in kept() {
                 if !rule.fast {
                     errors.push(format!(
                         "--only: {} is not part of --fast; run without --fast",
@@ -146,7 +148,7 @@ impl Plan {
                 }
             }
         }
-        for rule in &only {
+        for rule in kept() {
             if let Some(missing) = unconfigured(config, rule.id) {
                 errors.push(format!(
                     "--only: {} needs {missing}, which agenvil.toml does not set",

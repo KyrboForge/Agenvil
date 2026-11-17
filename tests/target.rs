@@ -93,7 +93,7 @@ fn resolves_a_standalone_project_deterministically() {
         serde_json::to_value(&results).unwrap(),
         json!([
             ["agents/bare.md", {"status": "inherit"}],
-            ["agents/cheap.md", {"code": "source-not-allowed", "message": "haiku/low is not an allowed pair; add it to [policy.models.claude].pairs or change the source"}],
+            ["agents/cheap.md", {"code": "source-not-allowed", "message": "model `haiku` is not allowed; add it to [policy.models.claude].models or change the source"}],
             ["agents/deep.md", {"status": "resolved", "source": ["opus", "xhigh"], "target": ["opus", "max"], "via": "override"}],
             ["agents/empty.md", {"status": "inherit"}],
             ["agents/planner.md", {"status": "resolved", "source": ["opus", "high"], "target": ["opus", "high"], "via": "same"}],

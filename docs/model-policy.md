@@ -57,10 +57,10 @@ target = ["opus", "max"]
 | --- | --- |
 | `model` or `effort` not a string | `not-a-string` |
 | a value that is not an alias, a `claude-*` ID or an effort level | `not-native` |
-| no `model` and no `effort` (omitted, empty, or `model: inherit`) | `inherit`, nothing to map |
+| no `model` and no `effort` (omitted, empty, `null`, or `model: inherit`) | `inherit`, nothing to map |
 | only `model` (in `models`, documented support) | `partial`, model kept, effort inherited |
 | only `effort` (in `efforts`), or `model: inherit` with an `effort` | `partial`, effort kept, model inherited |
-| a lone value not in `models`/`efforts` | `source-not-allowed` |
+| any declared value not in `models`/`efforts`, alone or in a pair | `source-not-allowed` |
 | a lone `model` without documented support | `unsupported-target` (maps are keyed by pairs) |
 | pair not in `pairs` | `source-not-allowed` |
 | pair has a `map` entry | `resolved`, `via: override` |

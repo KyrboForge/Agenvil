@@ -206,6 +206,78 @@ fn ag001_requires_every_key_and_a_matching_name() {
 }
 
 #[test]
+fn ag001_name_and_description_must_be_non_empty_strings() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        &dir,
+        "agenvil.toml",
+        "schema = 1\n[project]\nname = \"demo\"\n",
+    );
+    for (field, line) in [
+        ("description: \"\"", Some(3)),
+        ("description: \"  \"", Some(3)),
+        ("description: 123", Some(3)),
+        ("description: null", None),
+    ] {
+        write(
+            &dir,
+            "agents/reviewer.md",
+            format!("---\nname: reviewer\n{field}\n---\nBody\n"),
+        );
+        let (code, json) = check(&dir, &["--only", "AG001"]);
+        assert_eq!(code, 1, "{field}: {json}");
+        assert_eq!(
+            found(&json),
+            [("AG001".to_owned(), "agents/reviewer.md".to_owned(), line)],
+            "{field}: {json}"
+        );
+    }
+    write(
+        &dir,
+        "agents/reviewer.md",
+        "---\nname: 7\ndescription: Reviews\n---\nBody\n",
+    );
+    assert_finds(&dir, "AG001", "agents/reviewer.md", Some(2));
+}
+
+#[test]
+fn null_model_and_effort_are_inherited_even_with_allowlists() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        &dir,
+        "agenvil.toml",
+        "schema = 1\n[project]\nname = \"demo\"\n[policy.models.claude]\nmodels = [\"sonnet\"]\nefforts = [\"medium\"]\n",
+    );
+    write(
+        &dir,
+        "agents/reviewer.md",
+        "---\nname: reviewer\ndescription: Reviews\nmodel: null\neffort:\n---\nBody\n",
+    );
+    let (code, json) = check(&dir, &["--only", "AG001,AG002,AG003,AG004"]);
+    assert_eq!((code, ids(&json)), (0, Vec::<String>::new()), "{json}");
+}
+
+#[test]
+fn skip_wins_over_only_for_rule_prerequisites() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        &dir,
+        "agenvil.toml",
+        "schema = 1\n[project]\nname = \"demo\"\n",
+    );
+    write(
+        &dir,
+        "agents/reviewer.md",
+        "---\nname: reviewer\ndescription: Reviews\n---\nBody\n",
+    );
+    for skipped in ["PO001", "CF001", "HY001", "HY002"] {
+        let only = format!("AG001,{skipped}");
+        let (code, json) = check(&dir, &["--only", &only, "--skip", skipped]);
+        assert_eq!(code, 0, "{skipped}: {json}");
+    }
+}
+
+#[test]
 fn ag001_agent_without_frontmatter() {
     let dir = clean();
     write(&dir, "agents/reviewer.md", "just text\n");

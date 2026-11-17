@@ -273,6 +273,20 @@ pub fn claude(
             ),
         )
     };
+    // Field allowlists apply to every declared value, complete pairs and mapped ones included.
+    if let Some(m) = &model
+        && policy.models.as_ref().is_some_and(|list| !list.contains(m))
+    {
+        return Err(not_allowed("model", m));
+    }
+    if let Some(e) = &effort
+        && policy
+            .efforts
+            .as_ref()
+            .is_some_and(|list| !list.contains(e))
+    {
+        return Err(not_allowed("effort", e));
+    }
     match (model, effort) {
         (None, None) => Ok(Resolution::Inherit),
         (Some(m), Some(e)) => resolve(
@@ -282,13 +296,6 @@ pub fn claude(
             claude_supports,
         ),
         (Some(m), None) => {
-            if policy
-                .models
-                .as_ref()
-                .is_some_and(|list| !list.contains(&m))
-            {
-                return Err(not_allowed("model", &m));
-            }
             claude_efforts(&m).map_err(|reason| {
                 diagnostic(
                     "unsupported-target",
@@ -300,19 +307,10 @@ pub fn claude(
                 effort: None,
             })
         }
-        (None, Some(e)) => {
-            if policy
-                .efforts
-                .as_ref()
-                .is_some_and(|list| !list.contains(&e))
-            {
-                return Err(not_allowed("effort", &e));
-            }
-            Ok(Resolution::Partial {
-                model: None,
-                effort: Some(e),
-            })
-        }
+        (None, Some(e)) => Ok(Resolution::Partial {
+            model: None,
+            effort: Some(e),
+        }),
     }
 }
 
@@ -407,6 +405,19 @@ mod tests {
         );
         // `efforts` is unset, so a lone effort is only held to the native levels.
         assert!(claude(&config, None, Some(&json!("max"))).is_ok());
+    }
+
+    #[test]
+    fn field_allowlists_also_hold_complete_and_mapped_pairs() {
+        let map = "[[targets.claude.map]]\nsource = [\"opus\", \"xhigh\"]\ntarget = [\"opus\", \"max\"]\n";
+        let config = config(&format!(
+            "[policy.models.claude]\nmodels = [\"sonnet\"]\nefforts = [\"medium\"]\n{map}"
+        ));
+        assert!(run(&config, "sonnet", "medium").is_ok());
+        for (m, e) in [("opus", "medium"), ("sonnet", "high"), ("opus", "xhigh")] {
+            let error = run(&config, m, e).unwrap_err();
+            assert_eq!(error.code, "source-not-allowed", "{m}/{e}");
+        }
     }
 
     #[test]

@@ -371,15 +371,28 @@ fn ag001(ctx: &Ctx, out: &mut Vec<Hit>) {
             continue;
         }
         for key in required {
-            if value(agent, key).is_none() {
-                out.push(file_hit(
+            match value(agent, key) {
+                None => out.push(file_hit(
                     &agent.path,
                     format!("missing required key `{key}`"),
-                ));
+                )),
+                // `build` needs both as non-empty strings.
+                Some(found)
+                    if matches!(*key, "name" | "description")
+                        && !found.as_str().is_some_and(|s| !s.trim().is_empty()) =>
+                {
+                    out.push(key_hit(
+                        agent,
+                        key,
+                        format!("`{key}` must be a non-empty string, found {found}"),
+                    ));
+                }
+                Some(_) => {}
             }
         }
-        if let Some(name) = value(agent, "name")
-            && name.as_str() != Some(agent.name.as_str())
+        if let Some(name) = value(agent, "name").and_then(Value::as_str)
+            && !name.trim().is_empty()
+            && name != agent.name
         {
             out.push(key_hit(
                 agent,
@@ -397,7 +410,7 @@ fn required_list(keys: &[&str]) -> String {
 
 /// A declared value must be on the project's allowlist (when it has one) and native to Claude,
 /// the same two checks `build` makes. `inherit` is a native model value unless the TAK profile
-/// wants every model named.
+/// wants every model named. A `null` value is unset, so inherited, as in `build`.
 fn allowed_value(
     ctx: &Ctx,
     out: &mut Vec<Hit>,
