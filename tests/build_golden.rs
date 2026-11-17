@@ -18,7 +18,7 @@ use common::{agenvil_in, snapshot};
 use predicates::prelude::*;
 use tempfile::TempDir;
 
-const CASES: [&str; 2] = ["models", "skills-rules"];
+const CASES: [&str; 3] = ["models", "skills-rules", "instructions"];
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn fixture(case: &str) -> PathBuf {

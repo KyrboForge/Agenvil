@@ -967,6 +967,27 @@ fn validate_tree(tree: &Tree) -> Vec<Finding> {
     let mut agent_skills: Vec<(&str, Vec<String>)> = Vec::new();
     for (path, node) in &tree.nodes {
         let parts: Vec<&str> = path.split('/').collect();
+        // Project instructions are plain Markdown: UTF-8, no frontmatter requirement. Any other
+        // file Claude Code would load as instructions is not something a build produces.
+        match parts.as_slice() {
+            ["CLAUDE.md"] => {
+                if let Node::File(bytes) = node
+                    && std::str::from_utf8(bytes).is_err()
+                {
+                    findings.push(finding(
+                        Kind::Invalid,
+                        path,
+                        "project instructions must be UTF-8 text",
+                    ));
+                }
+            }
+            ["CLAUDE.local.md"] | [".claude", "CLAUDE.md"] => findings.push(finding(
+                Kind::Invalid,
+                path,
+                "the only instruction entrypoint is CLAUDE.md at the root of the tree",
+            )),
+            _ => {}
+        }
         if parts.first() != Some(&".claude") || parts.len() < 3 {
             continue;
         }
@@ -1216,6 +1237,45 @@ mod tests {
     }
 
     const AGENT: &str = "---\nname: a\ndescription: d\n---\nbody\n";
+
+    #[test]
+    fn root_claude_md_is_valid_utf8_markdown_without_frontmatter() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            &[entry("CLAUDE.md", "# Instructions\r\nZażółć 🦀")],
+        );
+        assert_eq!(validate_dir(dir.path()).unwrap(), []);
+    }
+
+    #[test]
+    fn root_claude_md_with_invalid_utf8_is_flagged_by_tree_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut invalid = entry("CLAUDE.md", "");
+        invalid.bytes = vec![0xff, 0xfe];
+        write(dir.path(), &[invalid]);
+        let found = validate_tree(&scan(dir.path()).unwrap());
+        assert_eq!(kinds(&found), [(Kind::Invalid, "CLAUDE.md")]);
+        assert!(found[0].detail.contains("UTF-8"));
+    }
+
+    #[test]
+    fn dot_claude_instruction_entrypoint_is_invalid_in_tree_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), &[entry(".claude/CLAUDE.md", "instructions")]);
+        let found = validate_tree(&scan(dir.path()).unwrap());
+        assert_eq!(kinds(&found), [(Kind::Invalid, ".claude/CLAUDE.md")]);
+        assert!(found[0].detail.contains("at the root"));
+    }
+
+    #[test]
+    fn claude_local_instruction_entrypoint_is_invalid_in_tree_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), &[entry("CLAUDE.local.md", "instructions")]);
+        let found = validate_tree(&scan(dir.path()).unwrap());
+        assert_eq!(kinds(&found), [(Kind::Invalid, "CLAUDE.local.md")]);
+        assert!(found[0].detail.contains("at the root"));
+    }
 
     #[test]
     fn matching_tree_has_no_findings_and_kinds_sort_in_report_order() {

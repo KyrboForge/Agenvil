@@ -109,6 +109,29 @@ issue; until then the parity column stays `blocked` or `deferred` rather than `a
 | 10 | The model policy is validated when `agenvil.toml` loads, and `[[targets.claude.map]]` adds explicit overrides; neither needs `POLICY.md`. | #9: a standalone project must not need kit files. PO001 itself is unchanged. | proposed |
 | 11 | TAK paths, policy and stricter rules require an explicit compatibility profile. | Standalone projects have neutral defaults. | proposed; #29 |
 
+## Claude Code concepts: `CLAUDE.md`, rules, agents and skills
+
+These are four distinct Claude Code features and are distinct in Agenvil's model:
+
+| Concept | Location in staging tree | Agenvil source | Purpose |
+| --- | --- | --- | --- |
+| Project instructions | `CLAUDE.md` (root) | `[paths] instructions` | Loaded into every Claude Code session in this project |
+| Modular rules | `.claude/rules/*.md` | `rules/` directory | Optional path-scoped rules; Claude Code reads their `paths` frontmatter |
+| Subagents | `.claude/agents/*.md` | `agents/` directory | Autonomous agents with their own model, tools and skills |
+| Skills | `.claude/skills/<name>/SKILL.md` | `skills/` directory | Reusable knowledge packs preloaded into an agent |
+
+`CLAUDE.md` and `.claude/CLAUDE.md` are **not** the same path. The build only ever writes
+the root `CLAUDE.md`; placing instructions at `.claude/CLAUDE.md` or `CLAUDE.local.md` is
+flagged invalid by the generated-tree validator.
+
+User/global instructions (`~/.claude/CLAUDE.md`) are HOME-state, out of scope and never written.
+
+### Manifest namespace
+
+The manifest `files` list may now contain exactly one root-level file, `CLAUDE.md`, in addition
+to the `.claude/agents/`, `.claude/rules/` and `.claude/skills/` paths. Any other path at the root
+of the staging tree is flagged as outside the managed namespace and cannot be owned by Agenvil.
+
 ## Migrating from TAK-style config
 
 To retain the prior TAK defaults, add:

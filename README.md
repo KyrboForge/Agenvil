@@ -136,6 +136,45 @@ staging tree in `.generated/claude/`. The output is **staging only**: nothing is
 [`docs/build.md`](docs/build.md) for a minimal project, skill references, model/effort mapping,
 the manifest and the safety rules.
 
+### Project instructions
+
+Add a `[paths] instructions` entry to include portable project-wide instructions in the build.
+The Claude target copies the file byte for byte to `CLAUDE.md` at the root of the staging tree:
+
+```
+my-agents/
+  agenvil.toml
+  instructions.md
+  agents/reviewer.md
+  skills/tdd/SKILL.md
+```
+
+```toml
+schema = 1
+
+[project]
+name = "my-agents"
+
+[paths]
+instructions = "instructions.md"
+
+[targets.claude]
+enabled = true
+```
+
+Resulting tree: `.generated/claude/{manifest.json, CLAUDE.md, .claude/{agents,skills,rules}}`.
+
+```sh
+agenvil check                                    # validate sources
+agenvil build --target claude                    # build the staging tree
+agenvil build --target claude --check            # compare staging tree with sources (read-only)
+```
+
+See [`docs/build.md#project-instructions-claudemd`](docs/build.md#project-instructions-claudemd)
+for source validation rules, manifest format, `--check`/`--clean` behaviour, and the distinction
+between staging and installing. See [`docs/instructions.md`](docs/instructions.md) for the
+portability model and future target-specific extension points.
+
 ## `agenvil check`
 
 Runs the [rules](docs/rules.md) over the inventory and prints findings (`id`, `severity`, `path`,
@@ -160,6 +199,7 @@ See [`examples/agenvil.toml`](examples/agenvil.toml); it is parsed by a unit tes
 | `[paths] agents` | path | `"agents"` | `agents/*.md` |
 | `[paths] skills` | path | `"skills"` | `skills/*/SKILL.md` |
 | `[paths] rules` | path | `"rules"` | `rules/*.md` |
+| `[paths] instructions` | path | unset | portable project instructions; Claude target copies to `CLAUDE.md` |
 | `[paths] policy` | path | unset | enables PO001 |
 | `[paths] defaults` | path | unset | enables CF001 |
 | `[paths] bin` | path | unset | enables HY002 |

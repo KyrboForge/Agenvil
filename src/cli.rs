@@ -278,11 +278,16 @@ fn execute(cli: &Cli) -> Result<(), Error> {
             }
             let built = build::claude(root, &config, &inventory, &out)?;
             println!(
-                "built {} agent(s), {} skill(s) and {} rule(s) as {} file(s) in {}\n\
+                "built {} agent(s), {} skill(s) and {} rule(s){} as {} file(s) in {}\n\
                  staging only: nothing was installed; copy or link the tree yourself",
                 built.agents,
                 built.skills,
                 built.rules,
+                if built.instructions {
+                    " plus CLAUDE.md"
+                } else {
+                    ""
+                },
                 built.files,
                 built.out.display()
             );
