@@ -6,9 +6,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+use std::fs::{self, File};
+use std::io::{self, Read};
+use std::path::Path;
 
 use serde_json::Value;
 
@@ -571,42 +571,24 @@ fn apply_cleanup(out: &Path, manifest: &Manifest, cleanup: &Cleanup) -> Result<(
         .iter()
         .map(|f| (f.path.as_str(), f))
         .collect();
+    let root = pinned::Root::open(out)?;
     for path in &cleanup.remove {
-        let target = join(out, path);
         let m = owned[path.as_str()];
         // Checked again right before the delete: the tree may have changed since the scan.
-        // Every ancestor must still be a real directory, or the path could leave `out`.
-        let mut ancestor = out.to_path_buf();
-        for part in path.split('/').take(path.split('/').count() - 1) {
-            ancestor.push(part);
-            if !fs::symlink_metadata(&ancestor)?.file_type().is_dir() {
-                return Err(Error::Out(
-                    out.to_path_buf(),
-                    format!("`{path}` changed during cleanup; nothing more was deleted"),
-                ));
+        let still_owned = root.remove(path, |file| {
+            let meta = file.metadata()?;
+            if !meta.is_file() || meta.len() != m.bytes {
+                return Ok(false);
             }
-        }
-        let meta = fs::symlink_metadata(&target)?;
-        if !meta.file_type().is_file() || meta.len() != m.bytes {
+            let mut bytes = Vec::new();
+            file.take(m.bytes + 1).read_to_end(&mut bytes)?;
+            Ok(manifest::sha256(&bytes) == m.sha256)
+        })?;
+        if !still_owned {
             return Err(Error::Out(
                 out.to_path_buf(),
                 format!("`{path}` changed during cleanup; nothing more was deleted"),
             ));
-        }
-        if manifest::sha256(&fs::read(&target)?) != m.sha256 {
-            return Err(Error::Out(
-                out.to_path_buf(),
-                format!("`{path}` changed during cleanup; nothing more was deleted"),
-            ));
-        }
-        fs::remove_file(&target)?;
-        // Prune directories this emptied; `remove_dir` refuses a directory with anything left.
-        let mut dir = target.parent();
-        while let Some(d) = dir.filter(|d| *d != out) {
-            if fs::remove_dir(d).is_err() {
-                break;
-            }
-            dir = d.parent();
         }
     }
     let dropped: BTreeSet<&str> = cleanup
@@ -617,29 +599,219 @@ fn apply_cleanup(out: &Path, manifest: &Manifest, cleanup: &Cleanup) -> Result<(
         .collect();
     let mut next = manifest.clone();
     next.files.retain(|f| !dropped.contains(f.path.as_str()));
-    write_manifest(out, &next)?;
-    Ok(())
+    let json = next.to_json().map_err(io::Error::from)?;
+    Ok(root.replace(manifest::FILE, json.as_bytes())?)
 }
 
-/// Replaces `manifest.json` atomically: a crash leaves the old or the new one, never half.
-fn write_manifest(out: &Path, manifest: &Manifest) -> Result<(), Error> {
-    let json = manifest.to_json().map_err(io::Error::from)?;
-    let tmp = out.join(format!(".manifest.json.agenvil-tmp-{}", std::process::id()));
-    let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
-    let written = file
-        .write_all(json.as_bytes())
-        .and_then(|()| file.sync_all());
-    drop(file);
-    let done = written.and_then(|()| fs::rename(&tmp, out.join(manifest::FILE)));
-    if done.is_err() {
-        let _ = fs::remove_file(&tmp);
+/// Destructive cleanup steps that cannot be redirected outside the staging directory, even if
+/// a directory inside it is swapped for a symlink or junction while they run.
+#[cfg(unix)]
+mod pinned {
+    use std::fs::File;
+    use std::io::{self, Write};
+    use std::os::fd::OwnedFd;
+    use std::path::Path;
+
+    use rustix::fs::{AtFlags, CWD, Mode, OFlags, fstat, openat, renameat, statat, unlinkat};
+    use rustix::io::Errno;
+
+    const DIR: OFlags = OFlags::RDONLY
+        .union(OFlags::DIRECTORY)
+        .union(OFlags::NOFOLLOW)
+        .union(OFlags::CLOEXEC);
+
+    /// Opening a component that is no longer a plain directory or file, or is gone.
+    fn moved(e: Errno) -> bool {
+        matches!(e, Errno::LOOP | Errno::NOTDIR | Errno::NOENT | Errno::MLINK)
     }
-    Ok(done?)
+
+    /// The staging directory, held open: every path below is resolved from this handle, one
+    /// component at a time, never following a link.
+    pub struct Root(OwnedFd);
+
+    impl Root {
+        pub fn open(out: &Path) -> io::Result<Self> {
+            Ok(Self(openat(CWD, out, DIR, Mode::empty())?))
+        }
+
+        /// Deletes `rel` if `verify` accepts the open file, then prunes the directories that
+        /// emptied. `Ok(false)`: something on the way changed, and nothing was deleted.
+        pub fn remove(
+            &self,
+            rel: &str,
+            verify: impl Fn(&File) -> io::Result<bool>,
+        ) -> io::Result<bool> {
+            let parts: Vec<&str> = rel.split('/').collect();
+            let (name, dirs) = parts.split_last().expect("split yields a part");
+            let mut chain: Vec<OwnedFd> = Vec::new();
+            for part in dirs {
+                match openat(chain.last().unwrap_or(&self.0), *part, DIR, Mode::empty()) {
+                    Ok(fd) => chain.push(fd),
+                    Err(e) if moved(e) => return Ok(false),
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            let parent = chain.last().unwrap_or(&self.0);
+            let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+            let file = match openat(parent, *name, flags, Mode::empty()) {
+                Ok(fd) => File::from(fd),
+                Err(e) if moved(e) => return Ok(false),
+                Err(e) => return Err(e.into()),
+            };
+            if !verify(&file)? {
+                return Ok(false);
+            }
+            // The name must still be the file just verified when it is unlinked.
+            let (now, was) = (
+                statat(parent, *name, AtFlags::SYMLINK_NOFOLLOW)?,
+                fstat(&file)?,
+            );
+            if (now.st_dev, now.st_ino) != (was.st_dev, was.st_ino) {
+                return Ok(false);
+            }
+            unlinkat(parent, *name, AtFlags::empty())?;
+            // `rmdir` refuses a directory with anything left in it.
+            for part in dirs.iter().rev() {
+                chain.pop();
+                if unlinkat(chain.last().unwrap_or(&self.0), *part, AtFlags::REMOVEDIR).is_err() {
+                    break;
+                }
+            }
+            Ok(true)
+        }
+
+        /// Replaces `name` atomically: a crash leaves the old or the new one, never half.
+        pub fn replace(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
+            let tmp = format!(".{name}.agenvil-tmp-{}", std::process::id());
+            let flags =
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+            let mut file = File::from(openat(&self.0, &tmp, flags, Mode::from_raw_mode(0o666))?);
+            let written = file.write_all(bytes).and_then(|()| file.sync_all());
+            drop(file);
+            let done = written.and_then(|()| Ok(renameat(&self.0, &tmp, &self.0, name)?));
+            if done.is_err() {
+                let _ = unlinkat(&self.0, &tmp, AtFlags::empty());
+            }
+            done
+        }
+    }
 }
 
-fn join(dir: &Path, rel: &str) -> PathBuf {
-    rel.split('/')
-        .fold(dir.to_path_buf(), |p, part| p.join(part))
+/// Windows has no `openat`, but a directory opened without `FILE_SHARE_DELETE` cannot be
+/// renamed, deleted or replaced while the handle is held. Every directory on the way is opened
+/// that way and checked not to be a reparse point (symlink or junction), so a path below them
+/// cannot leave the staging directory.
+#[cfg(windows)]
+mod pinned {
+    use std::fs::{self, File, OpenOptions};
+    use std::io::{self, Write};
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use std::path::{Path, PathBuf};
+
+    const FILE_SHARE_READ: u32 = 0x1;
+    const FILE_SHARE_WRITE: u32 = 0x2;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+
+    /// `path` itself (never a link's target), held so it cannot be moved or written; `None` if
+    /// it is a link or not the expected kind.
+    fn pin(path: &Path, dir: bool) -> io::Result<Option<File>> {
+        let (share, flags) = if dir {
+            (
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+            )
+        } else {
+            (FILE_SHARE_READ, FILE_FLAG_OPEN_REPARSE_POINT)
+        };
+        let file = match OpenOptions::new()
+            .read(true)
+            .share_mode(share)
+            .custom_flags(flags)
+            .open(path)
+        {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let meta = file.metadata()?;
+        let plain = meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+            && if dir { meta.is_dir() } else { meta.is_file() };
+        Ok(plain.then_some(file))
+    }
+
+    pub struct Root {
+        path: PathBuf,
+        _pin: File,
+    }
+
+    impl Root {
+        pub fn open(out: &Path) -> io::Result<Self> {
+            match pin(out, true)? {
+                Some(pin) => Ok(Self {
+                    path: out.to_path_buf(),
+                    _pin: pin,
+                }),
+                None => Err(io::Error::other(
+                    "the staging directory is not a plain directory",
+                )),
+            }
+        }
+
+        /// Deletes `rel` if `verify` accepts the open file, then prunes the directories that
+        /// emptied. `Ok(false)`: something on the way changed, and nothing was deleted.
+        pub fn remove(
+            &self,
+            rel: &str,
+            verify: impl Fn(&File) -> io::Result<bool>,
+        ) -> io::Result<bool> {
+            let parts: Vec<&str> = rel.split('/').collect();
+            let (name, dirs) = parts.split_last().expect("split yields a part");
+            let mut at = self.path.clone();
+            let mut chain: Vec<(PathBuf, File)> = Vec::new();
+            for part in dirs {
+                at.push(part);
+                match pin(&at, true)? {
+                    Some(pin) => chain.push((at.clone(), pin)),
+                    None => return Ok(false),
+                }
+            }
+            at.push(name);
+            let Some(file) = pin(&at, false)? else {
+                return Ok(false);
+            };
+            if !verify(&file)? {
+                return Ok(false);
+            }
+            drop(file);
+            // The parents are still pinned: the name can at most have become a link inside
+            // them, and deleting a link never touches its target.
+            fs::remove_file(&at)?;
+            while let Some((dir, pin)) = chain.pop() {
+                drop(pin);
+                if fs::remove_dir(&dir).is_err() {
+                    break;
+                }
+            }
+            Ok(true)
+        }
+
+        /// Replaces `name` atomically: a crash leaves the old or the new one, never half.
+        pub fn replace(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
+            let tmp = self
+                .path
+                .join(format!(".{name}.agenvil-tmp-{}", std::process::id()));
+            let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+            let written = file.write_all(bytes).and_then(|()| file.sync_all());
+            drop(file);
+            let done = written.and_then(|()| fs::rename(&tmp, self.path.join(name)));
+            if done.is_err() {
+                let _ = fs::remove_file(&tmp);
+            }
+            done
+        }
+    }
 }
 
 /// Text of the cleanup decision, deterministic: the exact files, then what was kept.
@@ -934,6 +1106,12 @@ fn resolved_pair(front: &frontmatter::Frontmatter, bad: &mut impl FnMut(String))
 mod tests {
     use super::*;
     use crate::manifest::Transform;
+    use std::path::PathBuf;
+
+    fn join(dir: &Path, rel: &str) -> PathBuf {
+        rel.split('/')
+            .fold(dir.to_path_buf(), |p, part| p.join(part))
+    }
 
     fn entry(path: &str, body: &str) -> Entry {
         Entry {
@@ -1136,5 +1314,49 @@ mod tests {
                 .any(|f| f.detail.contains("not a Claude model")),
             "{found:?}"
         );
+    }
+
+    /// A directory or the file itself swapped for a symlink after the plan was made must not
+    /// lead the delete outside the staging directory, even to an identical file.
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_never_follows_a_link_swapped_in_after_the_plan() {
+        for swapped in [".claude/agents", ".claude/agents/old.md"] {
+            let dir = tempfile::tempdir().unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            let old = [entry(".claude/agents/old.md", AGENT)];
+            write(dir.path(), &old);
+            let manifest = load_manifest(&scan(dir.path()).unwrap()).unwrap();
+            let cleanup = Cleanup {
+                remove: vec![".claude/agents/old.md".to_owned()],
+                ..Cleanup::default()
+            };
+            write(outside.path(), &[entry("agents/old.md", AGENT)]);
+            let target = if swapped.ends_with(".md") {
+                outside.path().join("agents/old.md")
+            } else {
+                outside.path().join("agents")
+            };
+            let link = join(dir.path(), swapped);
+            if link.is_dir() {
+                fs::remove_dir_all(&link).unwrap();
+            } else {
+                fs::remove_file(&link).unwrap();
+            }
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            let before = fs::read(dir.path().join(manifest::FILE)).unwrap();
+
+            let err = apply_cleanup(dir.path(), &manifest, &cleanup).unwrap_err();
+            assert!(
+                err.to_string().contains("changed during cleanup"),
+                "{swapped}: {err}"
+            );
+            assert!(outside.path().join("agents/old.md").is_file(), "{swapped}");
+            assert!(
+                fs::symlink_metadata(&link).unwrap().is_symlink(),
+                "{swapped}"
+            );
+            assert_eq!(fs::read(dir.path().join(manifest::FILE)).unwrap(), before);
+        }
     }
 }

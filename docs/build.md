@@ -184,11 +184,14 @@ no `~/.claude` and no HOME data) is ever a candidate. An `unsafe` finding or an 
 **blocks** the whole cleanup with nothing deleted (`cleanup blocked`). The manifest is rewritten
 atomically afterwards. A manifest entry is an ownership claim, never authorization to delete.
 
-Residual race: size, digest and every parent directory are re-checked (no symlink, still a
-directory) immediately before each delete, but the check and the delete are separate system calls
-and Agenvil has no directory-handle (`openat`) traversal. A local attacker who can write the
-staging directory *while* `--clean --apply` runs could still swap a parent for a symlink in that
-window. Do not run cleanup on a staging directory other users can write.
+Concurrent changes: each delete walks from a handle on `--out`, one directory at a time, never
+following a link, and checks the size and digest of the open file before deleting it. On Unix
+every step is relative to the parent's handle (`openat`/`unlinkat` with no-follow) and the name
+must still be the verified file when it is unlinked. On Windows every directory on the way is held
+open without delete sharing, so it cannot be renamed or replaced, and is checked not to be a
+symlink or junction. If anything on the way changed since the scan, cleanup stops
+(`changed during cleanup`) with nothing more deleted. Swapping a directory for a link while cleanup
+runs cannot redirect a delete outside `--out`. The manifest is rewritten through the same handle.
 
 ## Output
 
