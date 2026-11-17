@@ -8,28 +8,23 @@ the kit does not define something, this page says so instead of guessing (see
 
 ## Status
 
-| ID | Severity | `--fast` | Status | Checks |
+| ID | Severity | `--fast` | Status | Checks and applicability |
 | --- | --- | --- | --- | --- |
-| AG001 | error | yes | implemented | an agent has `name`, `description`, `model`, `effort`, `tools`; `name` equals the file name |
-| AG002 | error | yes | implemented | `model` is in `[policy.models.claude] models` |
-| AG003 | error | yes | implemented | `effort` is in `[policy.models.claude] efforts` |
-| AG004 | error | yes | implemented | `(model, effort)` is in `[policy.models.claude] pairs` |
-| AG005 | error | yes | implemented | `tools` is a non-empty YAML list of non-empty strings |
-| SK001 | error | yes | implemented | `SKILL.md` exists, `name` equals the directory, `description` is not empty |
-| SK002 | warning | **no** | implemented | a skill sets `model` and `effort` (an explicit `inherit` counts) |
-| CF001 | error | yes | implemented | `config/defaults.toml` has only known sections/keys with valid values |
-| PO001 | error | yes | implemented | the generated model table in `POLICY.md` matches the agents, both ways |
-| HY001 | error | yes | implemented | no `[hygiene] personal_patterns` match in agents, skills and rules |
-| HY002 | error | yes | implemented | files in `bin/` start with `#!` and (Unix) have an executable bit |
+| AG001 | error | yes | implemented | Agent requires `name` and `description`; name equals filename. TAK also requires `model`, `effort`, `tools`. |
+| AG002 | error | yes | implemented | Declared model must be native and satisfy any model allowlist; `inherit` is valid outside TAK. |
+| AG003 | error | yes | implemented | Declared effort must be native and satisfy any effort allowlist. |
+| AG004 | error | yes | implemented | Declared pair satisfies any pair allowlist and Claude target support or an explicit mapping. Missing fields are allowed. |
+| AG005 | error | yes | implemented | Optional `tools` must be a non-empty list or comma-separated string of non-empty names. TAK requires a list. |
+| SK001 | error | yes | implemented | Skill requires non-empty `name` matching its directory and `description`; Agenvil is stricter than Claude Code, where skill name is optional. |
+| SK002 | warning | no | implemented | Requires skill `model` and `effort` (including `inherit`); off unless TAK, `--only`, or a `[rules]` entry enables it. |
+| CF001 | error | yes | implemented | Checks defaults file when `[paths] defaults` is set. |
+| PO001 | error | yes | implemented | Checks the generated model table when `[paths] policy` is set. |
+| HY001 | error | yes | implemented | Checks files when `[hygiene] personal_patterns` is non-empty. |
+| HY002 | error | yes | implemented | Checks scripts when `[paths] bin` is set; executable bit checked on Unix. |
 
-Deferred (not implemented; tracked in [`compatibility.md`](compatibility.md)), all `Check::Deferred` in the catalog: AG006, AG007,
-CF002, CF003, CF004, CN001, FM001, HY003, HY005, SK003–SK006, ST001, ST002, TL001, TL002, TP001,
-WF001.
-
-**A deferred rule is never a pass.** Any selected deferred rule, including those in the default
-selection, makes the run exit `4` and names them on stderr (`cannot verify …: not implemented`,
-shown even with `--quiet`). To check only the implemented rules, opt out explicitly: pass
-`--skip` with the listed IDs, or set them to `"off"` under `[rules]`.
+The 19 deferred rules are listed in [`compatibility.md`](compatibility.md) and `agenvil rules`.
+A default check notes on stderr that they were not run; they are never counted as passed.
+Explicit selection with `--only` or a non-`off` `[rules]` entry exits `4` as unverifiable.
 
 ## Output
 
@@ -58,7 +53,7 @@ lines and the summary from the human format.
 | 4 | the verdict is incomplete |
 
 Exit `4` wins over `1`. It means a selected rule could not read its input: malformed frontmatter,
-a symlink, an oversized or non-UTF-8 file, an unreadable directory, a missing `POLICY.md` while
+a symlink, an oversized or non-UTF-8 file, an unreadable directory, a missing configured policy file while
 agents exist, or a selected deferred rule. Findings found so far are still printed, but
 a parse failure is never reported as a policy finding. Problems go to stderr, findings to stdout.
 
@@ -74,22 +69,14 @@ a parse failure is never reported as a policy finding. Problems go to stderr, fi
   (AG001–AG005, SK001, PO001, CF001–CF004, HY001, HY002).
 - `--config <FILE>` replaces `<root>/agenvil.toml`; `--root` still selects the project.
 
-## Known differences from the kit
+## Known differences from kit
 
-- **CF003 is not in `--fast`.** The kit lists it as fast, but it needs `git` (tracked files), and
-  `--fast` must not spawn processes. The rule is deferred and, once implemented, non-fast.
-- **SK002** is a warning outside `--fast`. The kit's tier-based exemptions are deferred with
-  SK003; until then every skill is held to the model/effort rule.
-- **AG004 pairs come from config.** The defaults match the kit's table
-  (`haiku+low`, `sonnet+medium|high`, `opus+high|xhigh`).
-- **CF001's key list is the kit's** (update, install, hooks, tools, headroom, connectors, packs)
-  and is only enforced when `config/defaults.toml` exists, so a project without it passes.
-- **HY001 patterns** default to `/Users/` and `~/.agents/` and live in `[hygiene]`.
-- **HY002** needs the executable bit only on Unix; on Windows only the shebang is checked.
-- **FM001** is not a rule here: malformed frontmatter is an input problem (exit `4`), which keeps
-  it distinguishable from a violation.
-- A skill directory without `SKILL.md` is reported by SK001; with SK001 skipped it is an input
-  problem again.
+TAK conventions are opt-in via `[compat] profile = "tak"`; see
+[compatibility and migration](compatibility.md#migrating-from-tak-style-config). CF003 is
+excluded from `--fast` because it needs git and remains deferred. HY002 checks executable bits
+only on Unix. Malformed frontmatter is an input problem (exit `4`), not an FM001 finding.
+A skill directory without `SKILL.md` is reported by SK001; other input problems are not
+reported again as SK001 findings.
 
 ## Unspecified in the kit
 

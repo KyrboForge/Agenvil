@@ -1,0 +1,7 @@
+schema = 1
+[project]
+name = "demo"
+[policy.models.claude]
+models = ["sonnet"]
+efforts = ["medium"]
+pairs = [["sonnet", "medium"]]

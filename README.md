@@ -6,6 +6,22 @@
 > `explain` and `build --target claude` are implemented (see [`docs/rules.md`](docs/rules.md) for
 > which rules). Drift checks (`build --check`) and cleanup are too; installation is not.
 
+## Quickstart
+
+Create `agenvil.toml` alongside `agents/` and `skills/`:
+
+```toml
+schema = 1
+[project]
+name = "my-agents"
+```
+
+Add agent and skill files as shown in [the build guide](docs/build.md), then run
+`agenvil check` and `agenvil build --target claude`. No TAK files are needed.
+See the [standalone configuration example](examples/agenvil.toml) for optional keys.
+
+For existing TAK-style configurations, see [migration guidance](docs/compatibility.md#migrating-from-tak-style-config).
+
 ## Commands
 
 | Command | Kind | Purpose |
@@ -31,7 +47,7 @@ outside the root.
 | 1 | policy findings at or above `--fail-on` (`check`), sources `build` cannot turn into valid output, or drift (`build --check`) |
 | 2 | usage or configuration error, including unknown rule IDs, severities and policy keys, a disabled target, an unsafe `--out` or an unsafe generated tree (symlink, escaping manifest path) |
 | 3 | internal error (including panics) |
-| 4 | unable to verify: a rule that is not implemented yet, or an inventory that is incomplete because of [problems](#problems); wins over `1` |
+| 4 | unable to verify: an explicitly selected rule that is not implemented yet, or an inventory that is incomplete because of [problems](#problems); wins over `1` |
 
 ## `agenvil inventory`
 
@@ -125,11 +141,10 @@ the manifest and the safety rules.
 Runs the [rules](docs/rules.md) over the inventory and prints findings (`id`, `severity`, `path`,
 `line`, `column`, `message`, `fix`) in a deterministic order. `--format json` prints
 `{"schema":1,"findings":[…],"summary":{"errors":0,"warnings":0}}`; `github` prints workflow
-annotations. Input problems (malformed frontmatter, symlinks, size limits, a missing `POLICY.md`)
-go to stderr and exit `4`: they are never reported as policy violations or as a pass. So does
-selecting a rule that is not implemented yet, which the default selection does; pass `--skip` with
-the listed IDs (or set them to `"off"` under `[rules]`) to check only the implemented rules.
-
+annotations. Incomplete input (including an unreadable file, or a missing configured policy
+file when agents exist) goes to stderr and exits `4`. The default check runs implemented,
+applicable rules and notes deferred rules on stderr; they are not counted as passed. Explicitly
+selecting a deferred rule with `--only` or a non-`off` `[rules]` entry exits `4`.
 `--fast` is offline: no subprocess, no network, no writes, and no script from the tree is ever
 executed. It excludes SK002 and the (deferred) CF003, which needs git. `check` never modifies the
 project or HOME.
@@ -145,17 +160,16 @@ See [`examples/agenvil.toml`](examples/agenvil.toml); it is parsed by a unit tes
 | `[paths] agents` | path | `"agents"` | `agents/*.md` |
 | `[paths] skills` | path | `"skills"` | `skills/*/SKILL.md` |
 | `[paths] rules` | path | `"rules"` | `rules/*.md` |
-| `[paths] policy` | path | `"POLICY.md"` | file with the model table (PO001) |
-| `[paths] defaults` | path | `"config/defaults.toml"` | validated by CF001 when present |
-| `[paths] bin` | path | `"bin"` | scripts checked by HY002 when present |
-| `[targets.claude] enabled` | bool | `true` | the only target in v0.1 |
-| `[policy.models.claude] models` | string list | `haiku`, `sonnet`, `opus` | AG002 |
-| `[policy.models.claude] efforts` | string list | `low`, `medium`, `high`, `xhigh` | AG003 |
-| `[policy.models.claude] pairs` | list of `[model, effort]` | the kit's five pairs | AG004 |
-| `[[targets.claude.map]] source, target` | `[model, effort]` pairs | none | explicit override of a source pair; see [`docs/model-policy.md`](docs/model-policy.md) |
+| `[paths] policy` | path | unset | enables PO001 |
+| `[paths] defaults` | path | unset | enables CF001 |
+| `[paths] bin` | path | unset | enables HY002 |
+| `[targets.claude] enabled` | boolean | `true` | Claude target |
+| `[policy.models.claude] models, efforts, pairs` | lists | unset | optional authoritative allowlists; see [model policy](docs/model-policy.md) |
+| `[[targets.claude.map]] source, target` | pairs | none | explicit target mapping |
 | `[rules] <ID>` | `"error"`, `"warning"`, `"off"` | rule default | severity override |
-| `[[ignore]] rule, path, reason` | strings | none | suppress one rule in one file; `reason` required |
-| `[hygiene] personal_patterns` | regex list | `/Users/`, `~/\.agents/` | HY001 (Rust regex, linear time) |
+| `[[ignore]] rule, path, reason` | strings | none | suppress one rule in one file; reason required |
+| `[hygiene] personal_patterns` | regex list | unset | enables HY001 when non-empty |
+| `[compat] profile` | `"tak"` | unset | opt in to [TAK defaults](docs/compatibility.md#migrating-from-tak-style-config) |
 
 - The model policy is validated when the file loads (duplicates, pairs outside `models`/`efforts`,
   unsupported mapping targets): exit `2`.
@@ -234,4 +248,4 @@ written, no repository script ran and the real HOME was never read.
 available, so [`docs/compatibility.md`](docs/compatibility.md) lists every rule with its parity
 status (none `verified`), the known differences awaiting approval and the proposed follow-ups.
 A green run means the implemented rules behave as the fixtures say; 19 of 30 rules are still
-deferred, and the default `check` exits `4` until they are implemented or skipped.
+deferred. Default `check` notes that they were not run; explicitly selecting one exits `4`.

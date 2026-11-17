@@ -62,6 +62,25 @@ pub struct Config {
     pub ignore: Vec<Ignore>,
     #[serde(default)]
     pub hygiene: Hygiene,
+    /// Opt-in legacy behavior; absent in a new project.
+    #[serde(default)]
+    pub compat: Compat,
+}
+
+/// `[compat]`: named bundles of legacy defaults. Nothing here is on unless the project asks.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Compat {
+    pub profile: Option<Profile>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Profile {
+    /// The Team Agents Kit conventions: every agent declares model, effort and tools; the model
+    /// table in `POLICY.md`; `config/defaults.toml`; `bin/` scripts; personal-path hygiene; the
+    /// five-pair model policy; SK002 on.
+    Tak,
 }
 
 /// What a rule does when it is configured in `[rules]`.
@@ -82,19 +101,12 @@ pub struct Ignore {
     pub reason: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Hygiene {
     /// Regular expressions (Rust syntax, linear-time) that must not occur in the checked files.
-    pub personal_patterns: Vec<String>,
-}
-
-impl Default for Hygiene {
-    fn default() -> Self {
-        Self {
-            personal_patterns: vec!["/Users/".to_owned(), r"~/\.agents/".to_owned()],
-        }
-    }
+    /// HY001 runs only when this is set.
+    pub personal_patterns: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -110,12 +122,12 @@ pub struct Paths {
     pub agents: RelPath,
     pub skills: RelPath,
     pub rules: RelPath,
-    /// Markdown file with the generated model table.
-    pub policy: RelPath,
-    /// Team defaults, validated by CF001 when present.
-    pub defaults: RelPath,
-    /// Scripts checked by HY002 when present.
-    pub bin: RelPath,
+    /// Markdown file with the generated model table; PO001 runs only when this is set.
+    pub policy: Option<RelPath>,
+    /// Team defaults, validated by CF001 only when this is set.
+    pub defaults: Option<RelPath>,
+    /// Scripts checked by HY002 only when this is set.
+    pub bin: Option<RelPath>,
 }
 
 impl Default for Paths {
@@ -125,9 +137,9 @@ impl Default for Paths {
             agents: rel("agents"),
             skills: rel("skills"),
             rules: rel("rules"),
-            policy: rel("POLICY.md"),
-            defaults: rel("config/defaults.toml"),
-            bin: rel("bin"),
+            policy: None,
+            defaults: None,
+            bin: None,
         }
     }
 }
@@ -168,30 +180,32 @@ pub struct Models {
     pub claude: ClaudeModels,
 }
 
-/// Native Claude `model` and `effort` values that agents may declare, and the pairs that may be
-/// combined. The defaults are the Team Agents Kit starting point.
-#[derive(Debug, Deserialize)]
+/// Allowlists for the native Claude `model` and `effort` values agents may declare. An unset
+/// list allows every native value (an alias or a full `claude-*` ID; the levels Claude Code
+/// documents); a set list is authoritative. `pairs` restricts which model and effort may be
+/// combined.
+#[derive(Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ClaudeModels {
-    pub models: Vec<String>,
-    pub efforts: Vec<String>,
-    pub pairs: Vec<[String; 2]>,
+    pub models: Option<Vec<String>>,
+    pub efforts: Option<Vec<String>>,
+    pub pairs: Option<Vec<[String; 2]>>,
 }
 
-impl Default for ClaudeModels {
-    fn default() -> Self {
-        let own = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect();
+impl ClaudeModels {
+    fn tak() -> Self {
+        let own = |items: &[&str]| Some(items.iter().map(|s| (*s).to_owned()).collect());
         let pair = |m: &str, e: &str| [m.to_owned(), e.to_owned()];
         Self {
             models: own(&["haiku", "sonnet", "opus"]),
             efforts: own(&["low", "medium", "high", "xhigh"]),
-            pairs: vec![
+            pairs: Some(vec![
                 pair("haiku", "low"),
                 pair("sonnet", "medium"),
                 pair("sonnet", "high"),
                 pair("opus", "high"),
                 pair("opus", "xhigh"),
-            ],
+            ]),
         }
     }
 }
@@ -278,6 +292,34 @@ impl Config {
         Self::parse(&text, &path)
     }
 
+    /// Whether the legacy Team Agents Kit profile is on.
+    pub fn tak(&self) -> bool {
+        self.compat.profile == Some(Profile::Tak)
+    }
+
+    /// Fills what the TAK profile defaults and the project did not set itself.
+    fn apply_profile(&mut self) {
+        if !self.tak() {
+            return;
+        }
+        let rel = |p: &str| Some(RelPath(PathBuf::from(p)));
+        let paths = &mut self.paths;
+        paths.policy = paths.policy.take().or_else(|| rel("POLICY.md"));
+        paths.defaults = paths
+            .defaults
+            .take()
+            .or_else(|| rel("config/defaults.toml"));
+        paths.bin = paths.bin.take().or_else(|| rel("bin"));
+        self.hygiene
+            .personal_patterns
+            .get_or_insert_with(|| vec!["/Users/".to_owned(), r"~/\.agents/".to_owned()]);
+        // The TAK table is one unit: filling part of it would contradict what the project set.
+        let claude = &mut self.policy.models.claude;
+        if *claude == ClaudeModels::default() {
+            *claude = ClaudeModels::tak();
+        }
+    }
+
     /// Every inconsistency in the Claude model policy and its target mappings, so one run lists
     /// them all. The values themselves may be any strings: whether the target supports them is
     /// decided at resolution time, except for mapping targets, which must be supported here.
@@ -295,23 +337,21 @@ impl Config {
                 seen.push(item);
             }
         };
-        list(
-            "[policy.models.claude].models",
-            policy.models.iter().collect(),
-        );
-        list(
-            "[policy.models.claude].efforts",
-            policy.efforts.iter().collect(),
-        );
+        if let Some(models) = &policy.models {
+            list("[policy.models.claude].models", models.iter().collect());
+        }
+        if let Some(efforts) = &policy.efforts {
+            list("[policy.models.claude].efforts", efforts.iter().collect());
+        }
         let mut pairs: Vec<&[String; 2]> = Vec::new();
-        for pair in &policy.pairs {
+        for pair in policy.pairs.iter().flatten() {
             let [model, effort] = pair;
-            if !policy.models.contains(model) {
+            if policy.models.as_ref().is_some_and(|m| !m.contains(model)) {
                 problems.push(format!(
                     "[policy.models.claude].pairs: {model}/{effort} uses a model missing from `models`"
                 ));
             }
-            if !policy.efforts.contains(effort) {
+            if policy.efforts.as_ref().is_some_and(|e| !e.contains(effort)) {
                 problems.push(format!(
                     "[policy.models.claude].pairs: {model}/{effort} uses an effort missing from `efforts`"
                 ));
@@ -326,7 +366,7 @@ impl Config {
         let mut sources: Vec<&[String; 2]> = Vec::new();
         for entry in map {
             let [model, effort] = &entry.source;
-            if !pairs.contains(&&entry.source) {
+            if policy.pairs.is_some() && !pairs.contains(&&entry.source) {
                 problems.push(format!(
                     "[[targets.claude.map]]: source {model}/{effort} is not in [policy.models.claude].pairs"
                 ));
@@ -364,7 +404,8 @@ impl Config {
                 path: path.to_owned(),
             }),
             Some(SCHEMA_VERSION) => {
-                let config: Self = toml::from_str(text).map_err(parse_err)?;
+                let mut config: Self = toml::from_str(text).map_err(parse_err)?;
+                config.apply_profile();
                 let problems = config.model_policy_problems();
                 if problems.is_empty() {
                     Ok(config)
@@ -408,6 +449,41 @@ mod tests {
     }
 
     #[test]
+    fn minimal_config_has_no_tak_assumptions() {
+        let config = parse(MINIMAL).unwrap();
+        assert!(!config.tak());
+        assert!(config.paths.policy.is_none() && config.paths.defaults.is_none());
+        assert!(config.paths.bin.is_none() && config.hygiene.personal_patterns.is_none());
+        let claude = &config.policy.models.claude;
+        assert!(claude.models.is_none() && claude.efforts.is_none() && claude.pairs.is_none());
+    }
+
+    #[test]
+    fn tak_profile_fills_only_what_the_project_left_unset() {
+        let config = parse(&format!(
+            "{MINIMAL}[compat]\nprofile = \"tak\"\n[paths]\nbin = \"scripts\"\n[policy.models.claude]\nmodels = [\"opus\"]\nefforts = [\"high\"]\npairs = [[\"opus\", \"high\"]]\n"
+        ))
+        .unwrap();
+        assert!(config.tak());
+        assert_eq!(config.paths.policy.unwrap().to_slash(), "POLICY.md");
+        assert_eq!(
+            config.paths.defaults.unwrap().to_slash(),
+            "config/defaults.toml"
+        );
+        assert_eq!(config.paths.bin.unwrap().to_slash(), "scripts");
+        assert_eq!(config.hygiene.personal_patterns.unwrap().len(), 2);
+        let claude = config.policy.models.claude;
+        assert_eq!(claude.models.unwrap(), ["opus"]);
+        assert_eq!(claude.pairs.unwrap().len(), 1);
+
+        let config = parse(&format!("{MINIMAL}[compat]\nprofile = \"tak\"\n")).unwrap();
+        assert_eq!(config.policy.models.claude.pairs.unwrap().len(), 5);
+        assert!(
+            err(&format!("{MINIMAL}[compat]\nprofile = \"other\"\n")).contains("unknown variant")
+        );
+    }
+
+    #[test]
     fn invalid_model_policy_lists_every_problem() {
         let message = err(&format!(
             "{MINIMAL}[policy.models.claude]\nmodels = [\"opus\", \"opus\", \"\"]\nefforts = [\"high\"]\npairs = [[\"opus\", \"low\"], [\"sonnet\", \"high\"], [\"opus\", \"high\"], [\"opus\", \"high\"]]\n"
@@ -426,7 +502,7 @@ mod tests {
     #[test]
     fn invalid_target_mappings_are_rejected() {
         let message = err(&format!(
-            "{MINIMAL}[[targets.claude.map]]\nsource = [\"opus\", \"max\"]\ntarget = [\"opus\", \"high\"]\n[[targets.claude.map]]\nsource = [\"opus\", \"high\"]\ntarget = [\"opus\", \"ultra\"]\n[[targets.claude.map]]\nsource = [\"opus\", \"high\"]\ntarget = [\"opus\", \"high\"]\n"
+            "{MINIMAL}[policy.models.claude]\npairs = [[\"opus\", \"high\"]]\n[[targets.claude.map]]\nsource = [\"opus\", \"max\"]\ntarget = [\"opus\", \"high\"]\n[[targets.claude.map]]\nsource = [\"opus\", \"high\"]\ntarget = [\"opus\", \"ultra\"]\n[[targets.claude.map]]\nsource = [\"opus\", \"high\"]\ntarget = [\"opus\", \"high\"]\n"
         ));
         for needle in [
             "source opus/max is not in [policy.models.claude].pairs",
@@ -453,7 +529,12 @@ mod tests {
     #[test]
     fn documented_example_parses() {
         let config = parse(include_str!("../examples/agenvil.toml")).unwrap();
+        assert!(!config.tak());
+        assert!(config.paths.policy.is_none());
+
+        let config = parse(include_str!("../examples/tak/agenvil.toml")).unwrap();
         assert_eq!(config.project.name, "team-agents-kit");
+        assert!(config.tak());
     }
 
     #[test]

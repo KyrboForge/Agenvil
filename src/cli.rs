@@ -134,10 +134,9 @@ enum Error {
     Incomplete(usize),
     /// Selected rules that have no implementation.
     #[error(
-        "cannot verify {}: not implemented, so the result is incomplete; to check only the \
-         implemented rules, pass `--skip {}` or set them to \"off\" under [rules] in agenvil.toml",
-        .0.join(", "),
-        .0.join(",")
+        "cannot verify {}: selected but not implemented, so the result is incomplete; drop them \
+         from `--only`, or set them to \"off\" under [rules] in agenvil.toml",
+        .0.join(", ")
     )]
     Unavailable(Vec<&'static str>),
     /// The staging tree differs from the sources; the report was printed.
@@ -233,6 +232,15 @@ fn execute(cli: &Cli) -> Result<(), Error> {
                 CheckFormat::Github => print!("{}", report::github(findings)),
             }
             eprint!("{}", report::problems(&outcome.problems));
+            if !plan.deferred.is_empty() {
+                // Not run and not a failure: say so rather than let silence read as "passed".
+                eprintln!(
+                    "note: {} rule(s) are not implemented yet and were not run: {} \
+                     (see `agenvil rules`)",
+                    plan.deferred.len(),
+                    plan.deferred.join(", ")
+                );
+            }
             // No verdict beats any finding: an incomplete run must not look like a clean or a
             // merely failing one.
             if !plan.unavailable.is_empty() {
@@ -393,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn config_errors_exit_usage_and_deferred_rules_exit_unverifiable() {
+    fn config_errors_exit_usage_and_selected_deferred_rules_exit_unverifiable() {
         let dir = tempfile::tempdir().unwrap();
         let cli = Cli::parse_from(["agenvil", "--root", dir.path().to_str().unwrap(), "check"]);
         assert_eq!(run(&cli), Exit::Usage);
@@ -403,7 +411,17 @@ mod tests {
             "schema = 1\n[project]\nname = \"x\"\n",
         )
         .unwrap();
-        // The default selection includes deferred rules, so the verdict is incomplete.
-        assert_eq!(run(&cli), Exit::Unverifiable);
+        // The default run covers the implemented rules; deferred ones are only reported.
+        assert_eq!(run(&cli), Exit::Success);
+        // Naming a deferred rule makes the verdict incomplete.
+        let only = Cli::parse_from([
+            "agenvil",
+            "--root",
+            dir.path().to_str().unwrap(),
+            "check",
+            "--only",
+            "AG006",
+        ]);
+        assert_eq!(run(&only), Exit::Unverifiable);
     }
 }

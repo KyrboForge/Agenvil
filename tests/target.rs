@@ -136,7 +136,7 @@ fn invalid_policy_is_a_usage_error_with_every_problem() {
     write(
         &dir,
         "agenvil.toml",
-        "schema = 1\n[project]\nname = \"x\"\n[policy.models.claude]\npairs = [[\"opus\", \"nope\"]]\n[[targets.claude.map]]\nsource = [\"opus\", \"high\"]\ntarget = [\"gpt-5\", \"high\"]\n",
+        "schema = 1\n[project]\nname = \"x\"\n[policy.models.claude]\nefforts = [\"high\"]\npairs = [[\"opus\", \"nope\"]]\n[[targets.claude.map]]\nsource = [\"opus\", \"high\"]\ntarget = [\"gpt-5\", \"high\"]\n",
     );
     let output = agenvil(&dir).args(["check"]).output().unwrap();
     assert_eq!(output.status.code(), Some(2));

@@ -9,12 +9,12 @@ see [`docs/compatibility.md`](../../docs/compatibility.md) for parity.
 | Registry rules | 30 |
 | Implemented | 11 |
 | Deferred | 19 |
-| Fixtures | 45 |
-| Pass (exit 0) | 8 |
-| Policy violations (exit 1) | 20 |
+| Fixtures | 51 |
+| Pass (exit 0) | 13 |
+| Policy violations (exit 1) | 22 |
 | Usage or config errors (exit 2) | 5 |
-| Incomplete verdict (exit 4) | 12 |
-| Fixtures with golden snapshots | 12 |
+| Incomplete verdict (exit 4) | 11 |
+| Fixtures with golden snapshots | 18 |
 | Parity verified against the shell | 0 |
 | Parity approved deviation | 0 |
 | Parity blocked (no oracle) | 11 |
@@ -26,10 +26,10 @@ see [`docs/compatibility.md`](../../docs/compatibility.md) for parity.
 | Rule | Status | Failing fixtures | With golden | Parity |
 |---|---|---|---|---|
 | AG001 | implemented | 3 | 2 | blocked |
-| AG002 | implemented | 5 | 4 | blocked |
-| AG003 | implemented | 2 | 1 | blocked |
-| AG004 | implemented | 8 | 4 | blocked |
-| AG005 | implemented | 2 | 0 | blocked |
+| AG002 | implemented | 7 | 6 | blocked |
+| AG003 | implemented | 4 | 3 | blocked |
+| AG004 | implemented | 10 | 6 | blocked |
+| AG005 | implemented | 3 | 1 | blocked |
 | AG006 | deferred | 0 | 0 | deferred |
 | AG007 | deferred | 0 | 0 | deferred |
 | CF001 | implemented | 3 | 0 | blocked |
@@ -44,7 +44,7 @@ see [`docs/compatibility.md`](../../docs/compatibility.md) for parity.
 | HY005 | deferred | 0 | 0 | deferred |
 | PO001 | implemented | 3 | 2 | blocked |
 | SK001 | implemented | 3 | 2 | blocked |
-| SK002 | implemented | 3 | 2 | blocked |
+| SK002 | implemented | 4 | 3 | blocked |
 | SK003 | deferred | 0 | 0 | deferred |
 | SK004 | deferred | 0 | 0 | deferred |
 | SK005 | deferred | 0 | 0 | deferred |
@@ -61,8 +61,9 @@ see [`docs/compatibility.md`](../../docs/compatibility.md) for parity.
 | Fixture | Exit | Rules | Golden | Platform |
 |---|---|---|---|---|
 | adversarial/bom-and-crlf | 0 |  |  | all |
+| adversarial/deferred-rules-noted | 0 |  | json, stderr | all |
 | adversarial/deferred-rules-selected | 4 |  | json, stderr | all |
-| adversarial/fast-excludes-cf003 | 4 |  |  | all |
+| adversarial/fast-excludes-cf003 | 0 |  |  | all |
 | adversarial/findings-and-input-problem | 4 | AG002, AG004 | json, stderr | all |
 | adversarial/github-escaping | 1 | AG002, AG004 | github, json | all |
 | adversarial/invalid-utf8 | 4 |  |  | all |
@@ -105,3 +106,8 @@ see [`docs/compatibility.md`](../../docs/compatibility.md) for parity.
 | skills/sk001-name-mismatch | 1 | SK001 | json, github, human | all |
 | skills/sk002-warning | 0 | SK002 | json, github, human | all |
 | skills/sk002-warning-fail-on-warning | 1 | SK002 |  | all |
+| standalone/declared-fields-checked | 1 | AG002, AG003, AG004, AG005 | json, human | all |
+| standalone/optional-fields-pass | 0 |  | json | all |
+| standalone/pass-minimal | 0 |  | json, human, stderr | all |
+| standalone/policy-allowlist-enforced | 1 | AG002, AG003, AG004 | json, human | all |
+| standalone/sk002-opt-in | 0 | SK002 | json | all |

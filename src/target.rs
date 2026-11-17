@@ -86,16 +86,16 @@ fn show(pair: &Pair) -> String {
 
 /// Resolves `source` for one target.
 ///
-/// 1. `source` must be one of `allowed` (the project policy).
+/// 1. `source` must be one of `allowed` (the project policy), when the policy lists pairs.
 /// 2. A matching entry in `maps` decides the target pair, which must be `supports`-ed.
 /// 3. Otherwise `source` itself must be supported; there is no fallback.
 pub fn resolve(
     source: &Pair,
-    allowed: &[Pair],
+    allowed: Option<&[Pair]>,
     maps: &[PairMap],
     supports: Supports,
 ) -> Result<Resolution, Diagnostic> {
-    if !allowed.contains(source) {
+    if allowed.is_some_and(|allowed| !allowed.contains(source)) {
         return Err(diagnostic(
             "source-not-allowed",
             format!(
@@ -240,8 +240,8 @@ pub fn claude_supports(pair: &Pair) -> Result<(), String> {
 /// claude`. Agents and skills go through the same function; neither is required to declare them.
 ///
 /// The fields are independent, as in Claude Code: an unset (or `null`) field, or `model:
-/// inherit`, is inherited. A complete pair goes through [`resolve`]; a lone value is checked
-/// against the policy's `models` or `efforts` list and kept as is.
+/// inherit`, is inherited. A complete pair goes through [`resolve`]; a lone value is kept as is.
+/// Policy lists are optional: an unset list allows every native value, a set one is authoritative.
 pub fn claude(
     config: &Config,
     model: Option<&Value>,
@@ -277,12 +277,16 @@ pub fn claude(
         (None, None) => Ok(Resolution::Inherit),
         (Some(m), Some(e)) => resolve(
             &[m, e],
-            &policy.pairs,
+            policy.pairs.as_deref(),
             &config.targets.claude.map,
             claude_supports,
         ),
         (Some(m), None) => {
-            if !policy.models.contains(&m) {
+            if policy
+                .models
+                .as_ref()
+                .is_some_and(|list| !list.contains(&m))
+            {
                 return Err(not_allowed("model", &m));
             }
             claude_efforts(&m).map_err(|reason| {
@@ -297,7 +301,11 @@ pub fn claude(
             })
         }
         (None, Some(e)) => {
-            if !policy.efforts.contains(&e) {
+            if policy
+                .efforts
+                .as_ref()
+                .is_some_and(|list| !list.contains(&e))
+            {
                 return Err(not_allowed("effort", &e));
             }
             Ok(Resolution::Partial {
@@ -319,6 +327,10 @@ mod tests {
         Config::parse(&text, Path::new("agenvil.toml")).unwrap()
     }
 
+    fn tak(extra: &str) -> Config {
+        config(&format!("[compat]\nprofile = \"tak\"\n{extra}"))
+    }
+
     fn run(config: &Config, model: &str, effort: &str) -> Result<Resolution, Diagnostic> {
         claude(config, Some(&json!(model)), Some(&json!(effort)))
     }
@@ -329,7 +341,7 @@ mod tests {
 
     #[test]
     fn allowed_native_pairs_pass_through() {
-        let config = config("");
+        let config = tak("");
         for (m, e) in [("opus", "high"), ("sonnet", "medium")] {
             assert_eq!(
                 run(&config, m, e),
@@ -344,14 +356,62 @@ mod tests {
 
     #[test]
     fn forbidden_pair_is_rejected_not_downgraded() {
-        let error = run(&config(""), "haiku", "high").unwrap_err();
+        let error = run(&tak(""), "haiku", "high").unwrap_err();
         assert_eq!(error.code, "source-not-allowed");
         assert!(error.message.contains("haiku/high"));
     }
 
     #[test]
+    fn without_a_policy_every_native_pair_is_allowed() {
+        let config = config("");
+        for (m, e) in [
+            ("haiku", "high"),
+            ("opus", "max"),
+            ("claude-opus-5-5", "xhigh"),
+        ] {
+            assert_eq!(
+                run(&config, m, e),
+                Ok(Resolution::Resolved {
+                    source: pair(m, e),
+                    target: pair(m, e),
+                    via: Via::Same
+                })
+            );
+        }
+        // Native capability is still enforced: no silent substitution, no invented values.
+        let error = run(&config, "claude-opus-4-6", "xhigh").unwrap_err();
+        assert_eq!(error.code, "missing-mapping");
+        assert_eq!(
+            run(&config, "gpt-5", "high").unwrap_err().code,
+            "not-native"
+        );
+        assert_eq!(
+            run(&config, "opus", "ultra").unwrap_err().code,
+            "not-native"
+        );
+    }
+
+    #[test]
+    fn a_user_allowlist_is_authoritative() {
+        let config =
+            config("[policy.models.claude]\nmodels = [\"opus\"]\npairs = [[\"opus\", \"high\"]]\n");
+        assert!(run(&config, "opus", "high").is_ok());
+        assert_eq!(
+            run(&config, "opus", "max").unwrap_err().code,
+            "source-not-allowed"
+        );
+        let sonnet = json!("sonnet");
+        assert_eq!(
+            claude(&config, Some(&sonnet), None).unwrap_err().code,
+            "source-not-allowed"
+        );
+        // `efforts` is unset, so a lone effort is only held to the native levels.
+        assert!(claude(&config, None, Some(&json!("max"))).is_ok());
+    }
+
+    #[test]
     fn explicit_override_wins_and_nothing_else_does() {
-        let config = config(
+        let config = tak(
             "[[targets.claude.map]]\nsource = [\"opus\", \"xhigh\"]\ntarget = [\"opus\", \"max\"]\n",
         );
         assert_eq!(
@@ -443,7 +503,7 @@ mod tests {
         }];
         let error = resolve(
             &source,
-            std::slice::from_ref(&source),
+            Some(std::slice::from_ref(&source)),
             &maps,
             claude_supports,
         )
@@ -475,7 +535,7 @@ mod tests {
 
     #[test]
     fn a_lone_field_is_kept_and_the_other_inherited() {
-        let config = config("");
+        let config = tak("");
         let (sonnet, high) = (json!("sonnet"), json!("high"));
         let model_only = Resolution::Partial {
             model: Some("sonnet".to_owned()),
@@ -558,7 +618,7 @@ mod tests {
             serde_json::to_string(&Resolution::Inherit).unwrap(),
             r#"{"status":"inherit"}"#
         );
-        let error = run(&config(""), "haiku", "high").unwrap_err();
+        let error = run(&tak(""), "haiku", "high").unwrap_err();
         assert_eq!(
             serde_json::to_string(&error).unwrap(),
             r#"{"code":"source-not-allowed","message":"haiku/high is not an allowed pair; add it to [policy.models.claude].pairs or change the source"}"#

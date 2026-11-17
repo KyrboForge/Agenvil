@@ -236,8 +236,14 @@ fn plan(root: &Path, config: &Config, inventory: &Inventory) -> Result<Vec<Entry
         let dir = skill.path.rsplit_once('/').map_or("", |(dir, _)| dir);
         let name_field = skill.frontmatter.as_ref().and_then(|f| f.get("name"));
         match name_field {
-            None | Some(Value::Null) => {}
             Some(Value::String(n)) if *n == skill.name => {}
+            None | Some(Value::Null) => issues.push(Issue {
+                path: skill.path.clone(),
+                message: format!(
+                    "frontmatter `name` is required and must equal the directory name `{}`",
+                    skill.name
+                ),
+            }),
             Some(other) => issues.push(Issue {
                 path: skill.path.clone(),
                 message: format!(

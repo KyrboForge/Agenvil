@@ -93,6 +93,9 @@ pub struct Plan {
     /// Selected rules without an implementation. Any of them makes the verdict incomplete, so
     /// they are never mistaken for passing.
     pub unavailable: Vec<&'static str>,
+    /// Rules without an implementation that nothing selected. They stay visible but do not make
+    /// the verdict incomplete: a default run covers the implemented, applicable rules.
+    pub deferred: Vec<&'static str>,
 }
 
 impl Plan {
@@ -121,7 +124,12 @@ impl Plan {
                 ));
             }
         }
-        for pattern in &config.hygiene.personal_patterns {
+        for pattern in config
+            .hygiene
+            .personal_patterns
+            .as_deref()
+            .unwrap_or_default()
+        {
             if let Err(message) = compile(pattern) {
                 errors.push(format!(
                     "agenvil.toml [hygiene] personal_patterns: `{pattern}`: {message}"
@@ -138,6 +146,14 @@ impl Plan {
                 }
             }
         }
+        for rule in &only {
+            if let Some(missing) = unconfigured(config, rule.id) {
+                errors.push(format!(
+                    "--only: {} needs {missing}, which agenvil.toml does not set",
+                    rule.id
+                ));
+            }
+        }
         if !errors.is_empty() {
             return Err(SettingsError(errors));
         }
@@ -145,6 +161,7 @@ impl Plan {
         let mut plan = Self {
             rules: Vec::new(),
             unavailable: Vec::new(),
+            deferred: Vec::new(),
         };
         for rule in CATALOG {
             let named = only.iter().any(|r| r.id == rule.id);
@@ -164,13 +181,45 @@ impl Plan {
                 Some(Level::Warning) => Severity::Warning,
                 Some(Level::Off) | None => rule.severity,
             };
+            // Selected: named, or given a level in [rules]. Anything else is the default set.
+            let selected = named || level.is_some();
+            if !selected && (unconfigured(config, rule.id).is_some() || opt_in(config, rule.id)) {
+                continue;
+            }
             match rule.check {
                 Check::Run(_) => plan.rules.push((rule, severity)),
-                Check::Deferred(_) => plan.unavailable.push(rule.id),
+                Check::Deferred(_) if selected => plan.unavailable.push(rule.id),
+                Check::Deferred(_) => plan.deferred.push(rule.id),
             }
         }
         Ok(plan)
     }
+}
+
+/// What a rule needs from `agenvil.toml` that is not set, if anything. Such a rule has nothing
+/// to check and is left out of a default run.
+fn unconfigured(config: &Config, id: &str) -> Option<&'static str> {
+    match id {
+        "PO001" => config.paths.policy.is_none().then_some("[paths] policy"),
+        "CF001" => config
+            .paths
+            .defaults
+            .is_none()
+            .then_some("[paths] defaults"),
+        "HY002" => config.paths.bin.is_none().then_some("[paths] bin"),
+        "HY001" => config
+            .hygiene
+            .personal_patterns
+            .as_deref()
+            .is_none_or(<[String]>::is_empty)
+            .then_some("[hygiene] personal_patterns"),
+        _ => None,
+    }
+}
+
+/// Rules that run only when asked for: `--only`, a `[rules]` entry or the TAK profile.
+fn opt_in(config: &Config, id: &str) -> bool {
+    id == "SK002" && !config.tak()
 }
 
 /// Looks up a rule ID from `origin`, recording an actionable error when it does not exist.
@@ -212,11 +261,11 @@ pub fn run(root: &Path, config: &Config, inventory: &Inventory, plan: &Plan) -> 
         .cloned()
         .partition(|p| wants("SK001") && p.kind == ProblemKind::MissingSkillFile);
 
-    let policy = if wants("PO001") {
-        let input = inputs::read_text(root, &config.paths.policy, MAX_INPUT_BYTES);
+    let policy = if let (true, Some(path)) = (wants("PO001"), &config.paths.policy) {
+        let input = inputs::read_text(root, path, MAX_INPUT_BYTES);
         match input {
             Input::Missing if !inventory.agents.is_empty() => Input::Problem(Problem {
-                path: config.paths.policy.to_slash(),
+                path: path.to_slash(),
                 line: None,
                 kind: ProblemKind::Missing,
                 message: "PO001 needs the policy file to compare with the agents; create it or skip PO001".to_owned(),
@@ -226,22 +275,24 @@ pub fn run(root: &Path, config: &Config, inventory: &Inventory, plan: &Plan) -> 
     } else {
         Input::Missing
     };
-    let defaults = if wants("CF001") {
-        inputs::read_text(root, &config.paths.defaults, MAX_INPUT_BYTES)
-    } else {
-        Input::Missing
+    let defaults = match (wants("CF001"), &config.paths.defaults) {
+        (true, Some(path)) => inputs::read_text(root, path, MAX_INPUT_BYTES),
+        _ => Input::Missing,
     };
-    let bin = if wants("HY002") {
-        let (files, found) = inputs::bin_files(root, &config.paths.bin, MAX_BIN_ENTRIES);
-        problems.extend(found);
-        files
-    } else {
-        Vec::new()
+    let bin = match (wants("HY002"), &config.paths.bin) {
+        (true, Some(path)) => {
+            let (files, found) = inputs::bin_files(root, path, MAX_BIN_ENTRIES);
+            problems.extend(found);
+            files
+        }
+        _ => Vec::new(),
     };
     // Validated by `Plan::new`.
     let patterns = config
         .hygiene
         .personal_patterns
+        .as_deref()
+        .unwrap_or_default()
         .iter()
         .filter_map(|p| compile(p).ok())
         .collect();

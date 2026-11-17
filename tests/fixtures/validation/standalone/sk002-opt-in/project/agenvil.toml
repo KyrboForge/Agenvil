@@ -1,0 +1,5 @@
+schema = 1
+[project]
+name = "demo"
+[rules]
+SK002 = "warning"

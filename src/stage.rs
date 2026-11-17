@@ -1058,8 +1058,10 @@ fn skill_frontmatter_name(node: &Node, dir: &str, bad: &mut impl FnMut(String)) 
         return;
     };
     match parsed.frontmatter.as_ref().and_then(|f| f.get("name")) {
-        None | Some(Value::Null) => {}
         Some(Value::String(n)) if n == dir => {}
+        None | Some(Value::Null) => bad(format!(
+            "frontmatter `name` is required and must equal the directory name `{dir}`"
+        )),
         Some(other) => bad(format!(
             "frontmatter `name` ({other}) must equal the directory name `{dir}`"
         )),

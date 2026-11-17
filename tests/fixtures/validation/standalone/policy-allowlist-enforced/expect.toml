@@ -1,0 +1,24 @@
+description = "an explicit [policy] allowlist is authoritative and is enforced"
+exit = 1
+golden = ["json", "human"]
+
+[[findings]]
+id = "AG002"
+severity = "error"
+path = "agents/big.md"
+line = 4
+column = 1
+
+[[findings]]
+id = "AG003"
+severity = "error"
+path = "agents/big.md"
+line = 5
+column = 1
+
+[[findings]]
+id = "AG004"
+severity = "error"
+path = "agents/big.md"
+line = 5
+column = 1

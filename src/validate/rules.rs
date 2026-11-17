@@ -1,14 +1,18 @@
 //! The rule catalog and the check for each implemented rule.
 //!
-//! Semantics come from the Team Agents Kit rule definitions. Where the kit leaves a detail
-//! unspecified, the rule does not check it (see `docs/rules.md`) rather than guessing.
+//! Rules check native Claude Code and Agent Skills requirements by default. The Team Agents Kit
+//! conventions (every agent declares model, effort and tools; `POLICY.md`; `config/defaults.toml`)
+//! apply only when `[compat] profile = "tak"` or the matching config key is set (see
+//! `docs/rules.md`). Where a detail is unspecified, the rule does not check it rather than guessing.
 
 use serde_json::Value;
 use toml::de::{DeTable, DeValue};
 
 use super::inputs::Input;
 use super::{Ctx, Hit, Severity};
+use crate::config::RelPath;
 use crate::inventory::Resource;
+use crate::target::{self, native_effort, native_model};
 
 pub enum Check {
     Run(fn(&Ctx, &mut Vec<Hit>)),
@@ -19,7 +23,7 @@ pub enum Check {
 pub struct Rule {
     pub id: &'static str,
     pub severity: Severity,
-    /// Part of `check --fast`: the kit's `--fast` rule list, minus rules that are Deferred.
+    /// Part of `check --fast`: offline and subprocess-free, and not Deferred.
     pub fast: bool,
     pub summary: &'static str,
     pub rationale: &'static str,
@@ -64,10 +68,10 @@ pub static CATALOG: &[Rule] = &[
         id: "AG001",
         severity: Error,
         fast: true,
-        summary: "An agent has name, description, model, effort and tools; name equals the file name.",
-        rationale: "Every agent must be fully specified so its model, effort and tool access never depend on defaults. The name must match the file so the agent can be found by name.",
-        fail: "agents/reviewer.md has `name: review` and no `tools`.",
-        pass: "agents/reviewer.md has `name: reviewer` and all five keys.",
+        summary: "An agent has name and description; name equals the file name.",
+        rationale: "`name` and `description` are what Claude Code needs to find and select an agent. `model`, `effort` and `tools` are optional and inherited when absent. With [compat] profile = \"tak\" they are required too, so nothing depends on defaults.",
+        fail: "agents/reviewer.md has `name: review` and no `description`.",
+        pass: "agents/reviewer.md has `name: reviewer` and a `description`.",
         fix: "Add the missing keys and set `name` to the file name without `.md`.",
         check: Run(ag001),
     },
@@ -76,10 +80,10 @@ pub static CATALOG: &[Rule] = &[
         severity: Error,
         fast: true,
         summary: "An agent's model is one of the allowed models.",
-        rationale: "Only vetted models may be used. The allowed set defaults to haiku, sonnet and opus and is set in [policy.models.claude].models.",
+        rationale: "A declared model must be a Claude alias (haiku, sonnet, opus, fable), a full `claude-*` ID or `inherit`. [policy.models.claude].models, when set, is the authoritative allowlist.",
         fail: "`model: gpt-4`",
         pass: "`model: sonnet`",
-        fix: "Use an allowed model, or extend [policy.models.claude].models in agenvil.toml.",
+        fix: "Use a native Claude model, or one from [policy.models.claude].models in agenvil.toml.",
         check: Run(ag002),
     },
     Rule {
@@ -87,32 +91,32 @@ pub static CATALOG: &[Rule] = &[
         severity: Error,
         fast: true,
         summary: "An agent's effort is one of the allowed efforts.",
-        rationale: "Effort drives cost and latency. The allowed set defaults to low, medium, high and xhigh; `max` is excluded on purpose.",
-        fail: "`effort: max`",
+        rationale: "Effort drives cost and latency. A declared effort must be one Claude Code documents (low, medium, high, xhigh, max). [policy.models.claude].efforts, when set, is the authoritative allowlist.",
+        fail: "`effort: ultra`",
         pass: "`effort: high`",
-        fix: "Use an allowed effort, or extend [policy.models.claude].efforts in agenvil.toml.",
+        fix: "Use a native Claude effort, or one from [policy.models.claude].efforts in agenvil.toml.",
         check: Run(ag003),
     },
     Rule {
         id: "AG004",
         severity: Error,
         fast: true,
-        summary: "An agent's model and effort form an allowed pair.",
-        rationale: "Not every effort suits every model. The pairs default to haiku+low, sonnet+medium, sonnet+high, opus+high and opus+xhigh and are set in [policy.models.claude].pairs.",
-        fail: "`model: haiku` with `effort: xhigh`",
+        summary: "An agent's model and effort form an allowed pair that Claude Code runs as written.",
+        rationale: "Not every effort suits every model. [policy.models.claude].pairs, when set, is the authoritative list. Independently, a pair Claude Code would silently run at a lower effort (for example `claude-opus-4-6` with `xhigh`) is rejected unless a [[targets.claude.map]] entry maps it, as `build` would.",
+        fail: "`model: claude-opus-4-6` with `effort: xhigh`",
         pass: "`model: opus` with `effort: high`",
-        fix: "Choose an allowed pair, or add the pair to [policy.models.claude].pairs.",
+        fix: "Choose a supported pair, add a [[targets.claude.map]] entry, or add the pair to [policy.models.claude].pairs.",
         check: Run(ag004),
     },
     Rule {
         id: "AG005",
         severity: Error,
         fast: true,
-        summary: "An agent's tools is an explicit, non-empty list.",
-        rationale: "Listing tools explicitly keeps agents at least privilege. Whether each name is a known tool is not checked: the kit does not define the list of known tools.",
-        fail: "`tools: Read, Grep` (not a list) or `tools: []`",
-        pass: "`tools: [Read, Grep]`",
-        fix: "Write `tools` as a YAML list of the tool names the agent needs.",
+        summary: "A declared `tools` is a non-empty list, or a comma-separated string, of tool names.",
+        rationale: "Omitting `tools` is fine: the agent inherits the session's tools. A declared value must name at least one tool. Whether each name is a known tool is not checked. With [compat] profile = \"tak\" `tools` is required and must be a YAML list.",
+        fail: "`tools: []` or `tools: \"\"`",
+        pass: "`tools: [Read, Grep]` or `tools: Read, Grep`",
+        fix: "Write `tools` as a list of the tool names the agent needs, or remove it to inherit all tools.",
         check: Run(ag005),
     },
     deferred(
@@ -131,8 +135,8 @@ pub static CATALOG: &[Rule] = &[
         id: "CF001",
         severity: Error,
         fast: true,
-        summary: "config/defaults.toml is valid TOML with only known keys and valid values.",
-        rationale: "Defaults are the only place for on/off switches, so a typo must not pass silently. Checked only when the file exists. This is the one rule that encodes the kit's own key list.",
+        summary: "The file at [paths] defaults is valid TOML with only known keys and valid values.",
+        rationale: "Runs only when [paths] defaults is set (the TAK profile sets it to config/defaults.toml) and the file exists. It encodes the Team Agents Kit key list, so a typo in an on/off switch must not pass silently.",
         fail: "`[update]` with `auto_update = \"weekly\"`",
         pass: "`[update]` with `auto_update = \"daily\"`",
         fix: "Use only the documented sections and keys with values of the documented type.",
@@ -173,7 +177,7 @@ pub static CATALOG: &[Rule] = &[
         severity: Error,
         fast: true,
         summary: "No personal paths or emails in agents, skills and rules.",
-        rationale: "Shared source must not leak a user's machine or identity. Patterns are the regexes in [hygiene].personal_patterns (default `/Users/` and `~/.agents/`). Only agent, skill and rule files are scanned.",
+        rationale: "Shared source must not leak a user's machine or identity. Runs only when [hygiene] personal_patterns is set (the TAK profile defaults it to `/Users/` and `~/.agents/`); the patterns are regexes. Only agent, skill and rule files are scanned.",
         fail: "A line containing `/Users/alice/notes`",
         pass: "A line containing `~/notes`",
         fix: "Replace the personal path or address with a placeholder, or change the patterns in [hygiene].",
@@ -183,8 +187,8 @@ pub static CATALOG: &[Rule] = &[
         id: "HY002",
         severity: Error,
         fast: true,
-        summary: "Files in bin/ are executable and start with a shebang.",
-        rationale: "Scripts that cannot run, or that run under the wrong interpreter, break installs. The executable bit is only checked on Unix.",
+        summary: "Files in the [paths] bin directory are executable and start with a shebang.",
+        rationale: "Runs only when [paths] bin is set (the TAK profile sets it to bin). Scripts that cannot run, or that run under the wrong interpreter, break installs. The executable bit is only checked on Unix.",
         fail: "bin/tool without `#!` on line 1, or with mode 0644",
         pass: "bin/tool with `#!/bin/sh` on line 1 and mode 0755",
         fix: "Add a shebang line and `chmod +x` the file.",
@@ -202,7 +206,7 @@ pub static CATALOG: &[Rule] = &[
         severity: Error,
         fast: true,
         summary: "The model table in the policy file matches the agents' model and effort, both ways.",
-        rationale: "The table between `<!-- kit:model-table -->` and `<!-- /kit:model-table -->` is generated from agent frontmatter; frontmatter wins when they disagree.",
+        rationale: "Runs only when [paths] policy is set (the TAK profile sets it to POLICY.md); the typed [policy] in agenvil.toml is the policy otherwise. The table between `<!-- kit:model-table -->` and `<!-- /kit:model-table -->` is generated from agent frontmatter; frontmatter wins when they disagree.",
         fail: "agents/a.md has `model: opus` but the table row says `sonnet`",
         pass: "Every agent has one row with its own model and effort, and no row names an unknown agent.",
         fix: "Regenerate or correct the table so each agent has exactly one matching row.",
@@ -224,7 +228,7 @@ pub static CATALOG: &[Rule] = &[
         severity: Warning,
         fast: false,
         summary: "A skill sets model and effort, or an explicit `inherit` for each.",
-        rationale: "Skills should state their cost explicitly. Tier-based exemptions (core-tier, third-party skills) need data the kit does not define yet; use [[ignore]] for exceptions. Not part of --fast, like the kit's own fast list.",
+        rationale: "Opt-in: off unless [rules] SK002 is set, the TAK profile is on or `--only SK002` names it. Skills may omit model and effort (they are inherited); this rule asks for them to be explicit. Tier-based exemptions need data the kit does not define yet; use [[ignore]] for exceptions. Not part of --fast.",
         fail: "A skill with no `effort` key",
         pass: "A skill with `model: inherit` and `effort: inherit`",
         fix: "Add `model` and `effort`, or set each to `inherit`.",
@@ -350,16 +354,23 @@ fn quoted(items: &[String]) -> String {
 // -- agents ----------------------------------------------------------------------------------
 
 fn ag001(ctx: &Ctx, out: &mut Vec<Hit>) {
-    const REQUIRED: [&str; 5] = ["name", "description", "model", "effort", "tools"];
+    let required: &[&str] = if ctx.config.tak() {
+        &["name", "description", "model", "effort", "tools"]
+    } else {
+        &["name", "description"]
+    };
     for agent in &ctx.inventory.agents {
         if agent.frontmatter.is_none() {
             out.push(file_hit(
                 &agent.path,
-                "agent has no frontmatter; `name`, `description`, `model`, `effort` and `tools` are required".to_owned(),
+                format!(
+                    "agent has no frontmatter; {} required",
+                    required_list(required)
+                ),
             ));
             continue;
         }
-        for key in REQUIRED {
+        for key in required {
             if value(agent, key).is_none() {
                 out.push(file_hit(
                     &agent.path,
@@ -379,54 +390,85 @@ fn ag001(ctx: &Ctx, out: &mut Vec<Hit>) {
     }
 }
 
-fn allowed_value(ctx: &Ctx, out: &mut Vec<Hit>, key: &str, allowed: &[String]) {
+fn required_list(keys: &[&str]) -> String {
+    let quoted: Vec<_> = keys.iter().map(|k| format!("`{k}`")).collect();
+    format!("{} are", quoted.join(", "))
+}
+
+/// A declared value must be on the project's allowlist (when it has one) and native to Claude,
+/// the same two checks `build` makes. `inherit` is a native model value unless the TAK profile
+/// wants every model named.
+fn allowed_value(
+    ctx: &Ctx,
+    out: &mut Vec<Hit>,
+    key: &str,
+    allowed: Option<&[String]>,
+    native: fn(&str) -> Result<(), String>,
+) {
     for agent in &ctx.inventory.agents {
         let Some(found) = value(agent, key) else {
-            continue; // a missing key is AG001's finding
+            continue; // a missing key is AG001's finding, or inherited
         };
-        if !found
-            .as_str()
-            .is_some_and(|s| allowed.iter().any(|a| a == s))
-        {
-            out.push(key_hit(
-                agent,
-                key,
-                format!(
-                    "`{key}: {found}` is not allowed; allowed: {}",
-                    quoted(allowed)
-                ),
-            ));
+        let text = found.as_str();
+        if key == "model" && text == Some("inherit") && !ctx.config.tak() {
+            continue;
+        }
+        let message = match (text, allowed) {
+            (Some(s), Some(list)) if !list.iter().any(|a| a == s) => Some(format!(
+                "`{key}: {found}` is not allowed; allowed: {}",
+                quoted(list)
+            )),
+            (None, _) => Some(format!("`{key}: {found}` must be a string")),
+            (Some(s), _) => native(s)
+                .err()
+                .map(|reason| format!("`{key}: {found}`: {reason}")),
+        };
+        if let Some(message) = message {
+            out.push(key_hit(agent, key, message));
         }
     }
 }
 
 fn ag002(ctx: &Ctx, out: &mut Vec<Hit>) {
-    allowed_value(ctx, out, "model", &ctx.config.policy.models.claude.models);
+    let allowed = ctx.config.policy.models.claude.models.as_deref();
+    allowed_value(ctx, out, "model", allowed, native_model);
 }
 
 fn ag003(ctx: &Ctx, out: &mut Vec<Hit>) {
-    allowed_value(ctx, out, "effort", &ctx.config.policy.models.claude.efforts);
+    let allowed = ctx.config.policy.models.claude.efforts.as_deref();
+    allowed_value(ctx, out, "effort", allowed, native_effort);
 }
 
 fn ag004(ctx: &Ctx, out: &mut Vec<Hit>) {
-    let pairs = &ctx.config.policy.models.claude.pairs;
+    let config = ctx.config;
+    let pairs = config.policy.models.claude.pairs.as_deref();
     for agent in &ctx.inventory.agents {
-        let (Some(model), Some(effort)) = (
-            value(agent, "model").and_then(Value::as_str),
-            value(agent, "effort").and_then(Value::as_str),
-        ) else {
-            continue; // missing or non-string values are AG001, AG002 and AG003
-        };
-        if !pairs.iter().any(|[m, e]| m == model && e == effort) {
-            let list: Vec<_> = pairs.iter().map(|[m, e]| format!("{m}+{e}")).collect();
+        let (model, effort) = (value(agent, "model"), value(agent, "effort"));
+        if let (Some(m), Some(e), Some(pairs)) = (
+            model.and_then(Value::as_str),
+            effort.and_then(Value::as_str),
+            pairs,
+        ) && (config.tak() || m != "inherit")
+            && !pairs.iter().any(|[pm, pe]| pm == m && pe == e)
+        {
+            let list: Vec<_> = pairs.iter().map(|[pm, pe]| format!("{pm}+{pe}")).collect();
             out.push(key_hit(
                 agent,
                 "effort",
                 format!(
-                    "`model: {model}` with `effort: {effort}` is not an allowed pair; allowed: {}",
+                    "`model: {m}` with `effort: {e}` is not an allowed pair; allowed: {}",
                     quoted(&list)
                 ),
             ));
+            continue;
+        }
+        // What `build` would refuse. Missing or non-native values are AG001, AG002 and AG003.
+        if config.targets.claude.enabled
+            && let Err(d) = target::claude(config, model, effort)
+            && matches!(d.code, "missing-mapping" | "unsupported-target")
+        {
+            let key = if effort.is_some() { "effort" } else { "model" };
+            out.push(key_hit(agent, key, d.message));
         }
     }
 }
@@ -434,19 +476,32 @@ fn ag004(ctx: &Ctx, out: &mut Vec<Hit>) {
 fn ag005(ctx: &Ctx, out: &mut Vec<Hit>) {
     for agent in &ctx.inventory.agents {
         let Some(tools) = value(agent, "tools") else {
-            continue; // a missing key is AG001's finding
+            continue; // a missing key is AG001's finding, or inherited
         };
-        let problem = match tools.as_array() {
-            None => Some("`tools` must be an explicit list, not a single value"),
-            Some(list) if list.is_empty() => Some("`tools` must not be empty"),
-            Some(list)
+        // Claude Code also accepts a comma-separated string; the TAK profile wants a list.
+        let problem = match (tools.as_array(), tools.as_str()) {
+            (None, Some(s)) if !ctx.config.tak() => {
+                if s.split(',').all(|t| t.trim().is_empty()) {
+                    Some("`tools` must not be empty")
+                } else if s.split(',').any(|t| t.trim().is_empty()) {
+                    Some("`tools` must not contain an empty name")
+                } else {
+                    None
+                }
+            }
+            (None, _) if ctx.config.tak() => {
+                Some("`tools` must be an explicit list, not a single value")
+            }
+            (None, _) => Some("`tools` must be a list or a comma-separated string"),
+            (Some(list), _) if list.is_empty() => Some("`tools` must not be empty"),
+            (Some(list), _)
                 if list
                     .iter()
                     .any(|t| t.as_str().is_none_or(|s| s.trim().is_empty())) =>
             {
                 Some("every entry in `tools` must be a non-empty string")
             }
-            Some(_) => None,
+            (Some(_), _) => None,
         };
         if let Some(message) = problem {
             out.push(key_hit(agent, "tools", message.to_owned()));
@@ -539,7 +594,9 @@ fn po001(ctx: &Ctx, out: &mut Vec<Hit>) {
     let Input::Text(policy) = &ctx.policy else {
         return; // unreadable or missing-with-agents is reported as a problem by the runner
     };
-    let path = ctx.config.paths.policy.to_slash();
+    let Some(path) = ctx.config.paths.policy.as_ref().map(RelPath::to_slash) else {
+        return;
+    };
     let policy = policy.strip_prefix('\u{feff}').unwrap_or(policy);
     let lines: Vec<&str> = policy
         .split('\n')
@@ -693,7 +750,9 @@ fn cf001(ctx: &Ctx, out: &mut Vec<Hit>) {
     let Input::Text(text) = &ctx.defaults else {
         return; // absent: nothing to validate; unreadable: reported as a problem by the runner
     };
-    let path = ctx.config.paths.defaults.to_slash();
+    let Some(path) = ctx.config.paths.defaults.as_ref().map(RelPath::to_slash) else {
+        return;
+    };
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let at = |offset: usize, message: String| {
         let before = &text[..offset.min(text.len())];

@@ -1,6 +1,8 @@
 schema = 1
 [project]
 name = "demo"
+[compat]
+profile = "tak"
 [[ignore]]
 rule = "AG002"
 path = "agents/reviewer.md"

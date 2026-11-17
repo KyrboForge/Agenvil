@@ -1,5 +1,7 @@
 schema = 1
 [project]
 name = "demo"
+[compat]
+profile = "tak"
 [rules]
 ZZ999 = "off"
