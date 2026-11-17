@@ -1,1 +1,1 @@
-error: cannot verify AG006, AG007, CF002, CF003, CF004, CN001, FM001, HY003, HY005, SK003, SK004, SK005, SK006, ST001, ST002, TL001, TL002, TP001, WF001: not implemented, so the result is incomplete; to check only the implemented rules, pass `--skip AG006,AG007,CF002,CF003,CF004,CN001,FM001,HY003,HY005,SK003,SK004,SK005,SK006,ST001,ST002,TL001,TL002,TP001,WF001` or set them to "off" under [rules] in agenvil.toml
+error: cannot verify AG006: selected but not implemented, so the result is incomplete; drop them from `--only`, or set them to "off" under [rules] in agenvil.toml

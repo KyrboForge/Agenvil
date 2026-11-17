@@ -358,14 +358,73 @@ fn explicit_override_rewrites_only_model_and_effort() {
 }
 
 #[test]
-fn unsupported_pair_fails_instead_of_falling_back() {
-    // The default policy does not allow `haiku/max`; the build must not guess a substitute.
+fn a_pair_outside_the_projects_policy_fails_instead_of_falling_back() {
+    // The policy allows only haiku/low; the build must not guess a substitute for haiku/max.
     let agent = "---\nname: a\ndescription: A.\nmodel: haiku\neffort: max\n---\n";
-    let p = Project::new(&[("agents/a.md", agent.as_bytes())]);
+    let config = format!("{CONFIG}[policy.models.claude]\npairs = [[\"haiku\", \"low\"]]\n");
+    let p = Project::new(&[
+        ("agents/a.md", agent.as_bytes()),
+        ("agenvil.toml", config.as_bytes()),
+    ]);
     p.build()
         .code(1)
         .stderr(predicate::str::contains("agents/a.md"))
         .stderr(predicate::str::contains("haiku/max"));
+    assert!(!p.path(".generated").exists());
+}
+
+#[test]
+fn field_allowlists_hold_complete_pairs_in_agents_and_skills() {
+    // No `pairs` list: `opus/high` must still fail `models = ["sonnet"]`, as AG002 says.
+    let config = format!("{CONFIG}[policy.models.claude]\nmodels = [\"sonnet\"]\n");
+    let pair = "model: opus\neffort: high\n";
+    for (path, source) in [
+        (
+            "agents/a.md",
+            format!("---\nname: a\ndescription: A.\n{pair}---\n"),
+        ),
+        (
+            "skills/tdd/SKILL.md",
+            format!("---\nname: tdd\ndescription: T.\n{pair}---\n"),
+        ),
+    ] {
+        let p = Project::new(&[
+            (path, source.as_bytes()),
+            ("agenvil.toml", config.as_bytes()),
+        ]);
+        p.build()
+            .code(1)
+            .stderr(predicate::str::contains(path))
+            .stderr(predicate::str::contains("model `opus` is not allowed"));
+    }
+}
+
+#[test]
+fn null_model_and_effort_are_inherited_under_allowlists() {
+    let config =
+        format!("{CONFIG}[policy.models.claude]\nmodels = [\"sonnet\"]\nefforts = [\"medium\"]\n");
+    let agent = "---\nname: a\ndescription: A.\nmodel: null\neffort:\n---\n";
+    let p = Project::new(&[
+        ("agents/a.md", agent.as_bytes()),
+        ("agenvil.toml", config.as_bytes()),
+    ]);
+    // `check` agrees with `build`: null is inheritance, not a disallowed value.
+    agenvil_in(p.dir.path(), p.home.path())
+        .arg("check")
+        .assert()
+        .success();
+    p.build().success();
+}
+
+#[test]
+fn a_pair_claude_would_downgrade_fails_without_a_mapping() {
+    // No policy at all: the neutral default still never runs a pair at a different effort.
+    let agent = "---\nname: a\ndescription: A.\nmodel: claude-opus-4-6\neffort: xhigh\n---\n";
+    let p = Project::new(&[("agents/a.md", agent.as_bytes())]);
+    p.build()
+        .code(1)
+        .stderr(predicate::str::contains("agents/a.md"))
+        .stderr(predicate::str::contains("claude-opus-4-6/xhigh"));
     assert!(!p.path(".generated").exists());
 }
 

@@ -4,9 +4,9 @@ This page records how far `agenvil check` matches the legacy Team Agents Kit she
 ("the shell"), rule by rule. It is the only place that claims parity, and it claims very little on
 purpose.
 
-> **Green CI does not mean full compatibility.** 19 of the 30 registry rules are deferred and make
-> `check` exit `4`. The 11 implemented rules are tested against Agenvil's own fixtures; **no legacy
-> shell output has been captured**, so none of them is `verified`.
+> **Green CI does not mean full compatibility.** 19 of 30 rules are deferred. Default
+> `check` notes they were not run; explicitly selecting one exits `4`. The 11 implemented
+> rules have Agenvil fixtures, but no legacy shell output has been captured, so parity is 0 verified.
 
 ## Legacy oracle status
 
@@ -102,12 +102,33 @@ issue; until then the parity column stays `blocked` or `deferred` rather than `a
 | 3 | CF003 is excluded from `check --fast`. | It needs `git`, and `--fast` must be offline and spawn no process (ADR #21 decision 6). The kit lists CF003 as fast. The rule is also deferred. | proposed (ADR #21 allows a full-check-only rule if documented) |
 | 4 | Malformed frontmatter is an exit-4 input problem, not a policy finding (no FM001 finding). | Keeps "could not read" distinct from "violates policy", so a parse failure is never a pass or a false violation. | proposed |
 | 5 | Models and efforts are native Claude values, checked against an allowed-pair policy; no `cheap`/`strong` tiers. | ADR #21 decision 4. | proposed (decided in ADR #21) |
-| 6 | The allowed models, efforts and pairs (AG002-AG004) and HY001 patterns come from `agenvil.toml`; the defaults match the kit's table. | Policy belongs to the project; the defaults keep kit behaviour. | proposed |
-| 7 | Incomplete coverage: 19 rules are deferred. A default `check` exits `4` until they are implemented or explicitly skipped. | Failing closed beats a green result that skipped rules. | proposed (not a deviation to approve, a gap to close: F2-F7) |
+| 6 | Model and effort allowlists and hygiene patterns are optional; TAK supplies its defaults. | Project policy is explicit. | proposed |
+| 7 | 19 rules are deferred; default checks note them, explicit selection exits 4. | Unrun rules are not reported as passed. | proposed; F2–F7 |
 | 8 | HY002 checks the executable bit on Unix only. | Windows has no such bit; CI runs on Windows. | proposed |
 | 9 | A symlink is an input problem (exit 4); a BOM or CRLF is accepted. HY003 and HY005 would report these as warnings. | Symlinks are never followed (safety); BOM/CRLF handling follows #6. The shell's behaviour is unverified. | proposed; F6 |
 | 10 | The model policy is validated when `agenvil.toml` loads, and `[[targets.claude.map]]` adds explicit overrides; neither needs `POLICY.md`. | #9: a standalone project must not need kit files. PO001 itself is unchanged. | proposed |
-| 11 | PO001, AG001, SK002, the default pairs and the example config still follow kit conventions. | Not changed in #9 to avoid silent behaviour changes; corrections proposed in #29. | proposed; #29 |
+| 11 | TAK paths, policy and stricter rules require an explicit compatibility profile. | Standalone projects have neutral defaults. | proposed; #29 |
+
+## Migrating from TAK-style config
+
+To retain the prior TAK defaults, add:
+
+```toml
+[compat]
+profile = "tak"
+```
+
+This is the only profile and is never enabled implicitly. It fills unset paths with
+`POLICY.md`, `config/defaults.toml` and `bin`, and unset hygiene patterns with `/Users/`
+and `~/\.agents/`. It supplies models `haiku`, `sonnet`, `opus`, efforts `low`, `medium`,
+`high`, `xhigh`, and pairs `haiku/low`, `sonnet/medium`, `sonnet/high`, `opus/high`,
+`opus/xhigh`. It also requires agent model, effort and a tools list, and enables SK002 as a
+warning. Explicit values win; the model policy is filled as a unit only when all three lists
+are unset. These defaults do not establish shell-validator parity.
+
+Alternatively, remove redundant TAK settings for a neutral standalone project, or configure
+`[paths]` and `[policy.models.claude]` explicitly. See the [neutral example](../examples/agenvil.toml)
+and [TAK example](../examples/tak/agenvil.toml).
 
 ## Proposed follow-up issues
 

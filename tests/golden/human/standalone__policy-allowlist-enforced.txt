@@ -1,0 +1,7 @@
+agents/big.md:4:1: error[AG002] `model: "opus"` is not allowed; allowed: `sonnet`
+    fix: Use a native Claude model, or one from [policy.models.claude].models in agenvil.toml.
+agents/big.md:5:1: error[AG003] `effort: "high"` is not allowed; allowed: `medium`
+    fix: Use a native Claude effort, or one from [policy.models.claude].efforts in agenvil.toml.
+agents/big.md:5:1: error[AG004] `model: opus` with `effort: high` is not an allowed pair; allowed: `sonnet+medium`
+    fix: Choose a supported pair, add a [[targets.claude.map]] entry, or add the pair to [policy.models.claude].pairs.
+3 error(s), 0 warning(s)

@@ -1,0 +1,5 @@
+description = "a default run covers the implemented rules and only notes the deferred ones"
+exit = 0
+deferred = "select"
+golden = ["json", "stderr"]
+stderr_contains = ["19 rule(s) are not implemented yet", "AG006"]

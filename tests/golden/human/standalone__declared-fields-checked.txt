@@ -1,0 +1,9 @@
+agents/bad.md:4:1: error[AG002] `model: "gpt-4"`: `gpt-4` is not a Claude model alias (haiku, sonnet, opus, fable) or a full `claude-*` model ID
+    fix: Use a native Claude model, or one from [policy.models.claude].models in agenvil.toml.
+agents/bad.md:5:1: error[AG003] `effort: "ultra"`: `ultra` is not a Claude effort level (low, medium, high, xhigh, max)
+    fix: Use a native Claude effort, or one from [policy.models.claude].efforts in agenvil.toml.
+agents/bad.md:6:1: error[AG005] `tools` must not be empty
+    fix: Write `tools` as a list of the tool names the agent needs, or remove it to inherit all tools.
+agents/old.md:5:1: error[AG004] claude-opus-4-6/xhigh is allowed but the target does not support it (`claude-opus-4-6` does not support effort `xhigh` (it supports low, medium, high, max); Claude Code would silently run a lower level) and no mapping is configured; add a [[targets.<name>.map]] entry or change the source
+    fix: Choose a supported pair, add a [[targets.claude.map]] entry, or add the pair to [policy.models.claude].pairs.
+4 error(s), 0 warning(s)

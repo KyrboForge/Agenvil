@@ -1,50 +1,41 @@
-# Every key shown here is optional except `schema` and `[project] name`;
-# the values below are the defaults (see README.md for the full schema).
+# Only schema and project name are required.
 schema = 1
-
 [project]
-name = "team-agents-kit"
+name = "my-agents"
 
-[paths]
-agents = "agents"
-skills = "skills"
-rules = "rules"
-policy = "POLICY.md"
-defaults = "config/defaults.toml"
-bin = "bin"
+# [paths]
+# agents = "agents"
+# skills = "skills"
+# rules = "rules"
+# policy = "POLICY.md"          # Enables PO001
+# defaults = "config/defaults.toml" # Enables CF001
+# bin = "bin"                  # Enables HY002
 
-[targets.claude]
-enabled = true
+# [targets.claude]
+# enabled = true
 
-# What agents may declare (AG002-AG004). Checked when the file loads: pairs must use the models
-# and efforts listed here.
-[policy.models.claude]
-models = ["haiku", "sonnet", "opus"]
-efforts = ["low", "medium", "high", "xhigh"]
-pairs = [
-  ["haiku", "low"],
-  ["sonnet", "medium"],
-  ["sonnet", "high"],
-  ["opus", "high"],
-  ["opus", "xhigh"],
-]
+# Optional authoritative allowlists; omitted lists impose no project restriction.
+# [policy.models.claude]
+# models = ["sonnet", "opus"]
+# efforts = ["medium", "high"]
+# pairs = [["sonnet", "medium"], ["opus", "high"]]
 
-# Explicit overrides of a source pair for the Claude target (docs/model-policy.md). Without an
-# entry a pair is used as is, or rejected when Claude does not support it; nothing falls back.
+# Explicit mapping for a pair Claude would not run as written.
 # [[targets.claude.map]]
-# source = ["opus", "xhigh"]
-# target = ["opus", "max"]
+# source = ["claude-opus-4-6", "xhigh"]
+# target = ["opus", "high"]
 
-# Override a rule's severity, or turn it off: "error", "warning" or "off".
-[rules]
-SK002 = "warning"
+# [rules]
+# SK002 = "warning" # Require skill model and effort declarations
 
-# Suppress one rule in one file. `reason` is required.
 # [[ignore]]
 # rule = "AG002"
 # path = "agents/vendor.md"
-# reason = "pinned vendor model"
+# reason = "Reviewed exception"
 
-# Regexes that must not appear in agents, skills and rules (HY001).
-[hygiene]
-personal_patterns = ['/Users/', '~/\.agents/']
+# [hygiene]
+# personal_patterns = ['/Users/', '~/\.agents/']
+
+# Opt in to Team Agents Kit defaults; explicit configuration wins.
+# [compat]
+# profile = "tak"

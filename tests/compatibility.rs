@@ -110,7 +110,7 @@ fn every_implemented_rule_has_a_failing_fixture() {
 }
 
 #[test]
-fn default_check_fails_closed_while_rules_are_deferred() {
+fn default_check_notes_deferred_rules_and_named_ones_fail_closed() {
     let tmp = tempfile::tempdir().unwrap();
     let (project, home) = (tmp.path().join("p"), tmp.path().join("h"));
     fs::create_dir_all(&project).unwrap();
@@ -120,15 +120,25 @@ fn default_check_fails_closed_while_rules_are_deferred() {
         "schema = 1\n[project]\nname = \"demo\"\n",
     )
     .unwrap();
-    // No agents, skills or bin/: every implemented rule passes. Only the deferred ones are left.
+    // A default run covers the implemented, applicable rules; the rest are reported, not passed.
     let out = agenvil_in(&project, &home).arg("check").output().unwrap();
     assert_eq!(
         out.status.code(),
-        Some(4),
-        "a pass must not hide deferred rules"
+        Some(0),
+        "deferred rules are not a failure"
     );
     let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("cannot verify") && stderr.contains("not implemented"));
+    assert!(stderr.contains("not implemented yet") && stderr.contains("AG006"));
+    // Selecting one explicitly leaves no verdict.
+    let out = agenvil_in(&project, &home)
+        .args(["check", "--only", "AG006"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "a pass must not hide a named deferred rule"
+    );
 }
 
 struct Row {

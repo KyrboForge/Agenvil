@@ -25,6 +25,10 @@ invents no `strong`/`cheap`/`balanced` tiers.
 
 ## Project policy (source side)
 
+By default no project allowlists are set. Each configured list is authoritative; omitted lists
+impose no project restriction. Native Claude validation still applies even to allowlisted values.
+The TAK five-pair table is enabled only by `[compat] profile = "tak"`.
+
 ```toml
 [policy.models.claude]
 models  = ["sonnet", "opus"]
@@ -35,7 +39,7 @@ pairs   = [["sonnet", "medium"], ["opus", "high"], ["opus", "xhigh"]]
 `pairs` is the allowlist of `(model, effort)` combinations a source may declare (AG002-AG004
 report violations). `agenvil.toml` is rejected with exit `2`, every problem listed, when `models` or
 `efforts` have empty or duplicate values, or when `pairs` has duplicates or uses a model or effort
-that is not in `models`/`efforts`. The policy values are free strings (legacy configs may hold
+that is not in a configured `models`/`efforts` list. The policy values are free strings (legacy configs may hold
 non-Claude names); when resolving, a source value that is not literal Claude frontmatter is
 `not-native`, whatever the policy says.
 
@@ -53,10 +57,10 @@ target = ["opus", "max"]
 | --- | --- |
 | `model` or `effort` not a string | `not-a-string` |
 | a value that is not an alias, a `claude-*` ID or an effort level | `not-native` |
-| no `model` and no `effort` (omitted, empty, or `model: inherit`) | `inherit`, nothing to map |
+| no `model` and no `effort` (omitted, empty, `null`, or `model: inherit`) | `inherit`, nothing to map |
 | only `model` (in `models`, documented support) | `partial`, model kept, effort inherited |
 | only `effort` (in `efforts`), or `model: inherit` with an `effort` | `partial`, effort kept, model inherited |
-| a lone value not in `models`/`efforts` | `source-not-allowed` |
+| any declared value not in `models`/`efforts`, alone or in a pair | `source-not-allowed` |
 | a lone `model` without documented support | `unsupported-target` (maps are keyed by pairs) |
 | pair not in `pairs` | `source-not-allowed` |
 | pair has a `map` entry | `resolved`, `via: override` |
@@ -64,7 +68,7 @@ target = ["opus", "max"]
 | pair allowed but not natively supported, no entry | `missing-mapping` |
 | `map` entry whose target is not natively supported | `unsupported-target` |
 
-A `map` entry is rejected at load time (exit `2`) if its `source` is not in `pairs`, is listed
+A `map` entry is rejected at load time (exit `2`) if a `pairs` list is configured and its `source` is not in it, is listed
 twice or is not native Claude frontmatter, or its `target` is not supported by Claude. There is no fallback: every result is either
 the source pair, an explicitly configured target pair, or a diagnostic with a stable `code`.
 Results serialise as JSON (`{"status":"resolved","source":[..],"target":[..],"via":"override"}`)
@@ -78,7 +82,7 @@ resolved on the Anthropic API, where every current model accepts all five levels
 resolves an alias to an older model may still lower the effort, so pin a full ID to have it checked.
 A lone `effort` cannot be checked against the inherited model at all.
 
-`agenvil build --target claude` calls it for every agent and skill ([build.md](build.md)); no rule does yet.
+`agenvil build --target claude` calls it for every agent and skill ([build.md](build.md)); AG002–AG004 also validate agent declarations.
 
 ## Adding a target
 
@@ -86,13 +90,7 @@ A lone `effort` cannot be checked against the inherited model at all.
 accepts) and its own `[[targets.<name>.map]]` entries (the same `PairMap` shape). Nothing else
 changes; no Codex adapter exists yet.
 
-## Legacy TAK differences
+## TAK compatibility
 
-Not changed by this document; tracked in #29 and in the
-[known differences](compatibility.md#known-differences):
-
-- PO001 compares agents with a `POLICY.md` model table (`kit:model-table` markers) and needs that
-  file. The model policy itself does not.
-- AG001 requires `model`, `effort` and `tools` on agents; SK002 warns when a skill omits
-  `model`/`effort`. Claude documents these as optional.
-- The default policy and `examples/agenvil.toml` are the TAK table.
+The opt-in TAK profile supplies its five-pair policy and stricter agent and skill rules.
+See [migration guidance](compatibility.md#migrating-from-tak-style-config).

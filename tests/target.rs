@@ -93,7 +93,7 @@ fn resolves_a_standalone_project_deterministically() {
         serde_json::to_value(&results).unwrap(),
         json!([
             ["agents/bare.md", {"status": "inherit"}],
-            ["agents/cheap.md", {"code": "source-not-allowed", "message": "haiku/low is not an allowed pair; add it to [policy.models.claude].pairs or change the source"}],
+            ["agents/cheap.md", {"code": "source-not-allowed", "message": "model `haiku` is not allowed; add it to [policy.models.claude].models or change the source"}],
             ["agents/deep.md", {"status": "resolved", "source": ["opus", "xhigh"], "target": ["opus", "max"], "via": "override"}],
             ["agents/empty.md", {"status": "inherit"}],
             ["agents/planner.md", {"status": "resolved", "source": ["opus", "high"], "target": ["opus", "high"], "via": "same"}],
@@ -136,7 +136,7 @@ fn invalid_policy_is_a_usage_error_with_every_problem() {
     write(
         &dir,
         "agenvil.toml",
-        "schema = 1\n[project]\nname = \"x\"\n[policy.models.claude]\npairs = [[\"opus\", \"nope\"]]\n[[targets.claude.map]]\nsource = [\"opus\", \"high\"]\ntarget = [\"gpt-5\", \"high\"]\n",
+        "schema = 1\n[project]\nname = \"x\"\n[policy.models.claude]\nefforts = [\"high\"]\npairs = [[\"opus\", \"nope\"]]\n[[targets.claude.map]]\nsource = [\"opus\", \"high\"]\ntarget = [\"gpt-5\", \"high\"]\n",
     );
     let output = agenvil(&dir).args(["check"]).output().unwrap();
     assert_eq!(output.status.code(), Some(2));

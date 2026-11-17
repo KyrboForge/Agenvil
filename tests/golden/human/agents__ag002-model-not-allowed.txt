@@ -1,5 +1,5 @@
 agents/reviewer.md:4:1: error[AG002] `model: "gpt-4"` is not allowed; allowed: `haiku`, `sonnet`, `opus`
-    fix: Use an allowed model, or extend [policy.models.claude].models in agenvil.toml.
+    fix: Use a native Claude model, or one from [policy.models.claude].models in agenvil.toml.
 agents/reviewer.md:5:1: error[AG004] `model: gpt-4` with `effort: high` is not an allowed pair; allowed: `haiku+low`, `sonnet+medium`, `sonnet+high`, `opus+high`, `opus+xhigh`
-    fix: Choose an allowed pair, or add the pair to [policy.models.claude].pairs.
+    fix: Choose a supported pair, add a [[targets.claude.map]] entry, or add the pair to [policy.models.claude].pairs.
 2 error(s), 0 warning(s)

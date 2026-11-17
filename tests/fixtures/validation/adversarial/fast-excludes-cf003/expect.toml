@@ -1,5 +1,5 @@
-description = "--fast never selects CF003 (it needs git)"
-exit = 4
+description = "--fast never selects CF003 (it needs git); other deferred fast rules are only noted"
+exit = 0
 args = ["--fast"]
 deferred = "select"
 stderr_contains = ["CF002"]

@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "findings": [
+    {
+      "id": "AG002",
+      "severity": "error",
+      "path": "agents/big.md",
+      "line": 4,
+      "column": 1,
+      "message": "`model: \"opus\"` is not allowed; allowed: `sonnet`",
+      "fix": "Use a native Claude model, or one from [policy.models.claude].models in agenvil.toml."
+    },
+    {
+      "id": "AG003",
+      "severity": "error",
+      "path": "agents/big.md",
+      "line": 5,
+      "column": 1,
+      "message": "`effort: \"high\"` is not allowed; allowed: `medium`",
+      "fix": "Use a native Claude effort, or one from [policy.models.claude].efforts in agenvil.toml."
+    },
+    {
+      "id": "AG004",
+      "severity": "error",
+      "path": "agents/big.md",
+      "line": 5,
+      "column": 1,
+      "message": "`model: opus` with `effort: high` is not an allowed pair; allowed: `sonnet+medium`",
+      "fix": "Choose a supported pair, add a [[targets.claude.map]] entry, or add the pair to [policy.models.claude].pairs."
+    }
+  ],
+  "summary": {
+    "errors": 3,
+    "warnings": 0
+  }
+}

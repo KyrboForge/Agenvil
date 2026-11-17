@@ -1,0 +1,3 @@
+description = "partial model/effort, string and list tools are all valid native declarations"
+exit = 0
+golden = ["json"]

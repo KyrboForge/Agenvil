@@ -1,6 +1,8 @@
 schema = 1
 [project]
 name = "demo"
+[compat]
+profile = "tak"
 [rules]
 AG002 = "warning"
 AG004 = "warning"

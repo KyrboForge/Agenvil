@@ -1,0 +1,4 @@
+description = "agenvil.toml, agents/ and skills/ only: no POLICY.md, no TAK files, no model/effort/tools declared"
+exit = 0
+golden = ["json", "human", "stderr"]
+stderr_excludes = ["POLICY.md", "cannot verify"]

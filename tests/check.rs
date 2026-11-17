@@ -10,7 +10,7 @@ use tempfile::TempDir;
 mod common;
 use common::{agenvil, deferred, snapshot};
 
-const CONFIG: &str = "schema = 1\n[project]\nname = \"demo\"\n";
+const CONFIG: &str = "schema = 1\n[project]\nname = \"demo\"\n[compat]\nprofile = \"tak\"\n";
 const AGENT: &str = "---\nname: reviewer\ndescription: Reviews code\nmodel: opus\neffort: high\ntools: [Read, Grep]\n---\nBody\n";
 const SKILL: &str =
     "---\nname: tdd\ndescription: Test first\nmodel: inherit\neffort: inherit\n---\nBody\n";
@@ -114,39 +114,50 @@ fn clean_project_passes_with_the_documented_json() {
 }
 
 #[test]
-fn default_check_cannot_verify_deferred_rules() {
+fn default_check_runs_implemented_rules_and_only_notes_deferred_ones() {
     let dir = clean();
-    let skip = format!("--skip {}", deferred());
-    let not_verified = || {
-        predicate::str::contains("cannot verify AG006, AG007,")
-            .and(predicate::str::contains("not implemented"))
-            .and(predicate::str::contains(skip.clone()))
-    };
+    agenvil(&dir)
+        .arg("check")
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("0 error(s), 0 warning(s)"))
+        .stderr(
+            predicate::str::contains("19 rule(s) are not implemented yet and were not run: AG006")
+                .and(predicate::str::contains("SK003")),
+        );
+    // `--quiet` must not hide the note.
+    agenvil(&dir)
+        .args(["check", "--quiet"])
+        .assert()
+        .code(0)
+        .stderr(predicate::str::contains("not implemented yet"));
+    // Selecting a deferred rule, on the command line or in [rules], leaves no verdict.
+    agenvil(&dir)
+        .args(["check", "--only", "AG006"])
+        .assert()
+        .code(4)
+        .stderr(predicate::str::contains("cannot verify AG006"));
+    write(
+        &dir,
+        "agenvil.toml",
+        format!("{CONFIG}[rules]\nAG006 = \"error\"\n"),
+    );
     agenvil(&dir)
         .arg("check")
         .assert()
         .code(4)
-        .stdout(predicate::str::contains("0 error(s), 0 warning(s)"))
-        .stderr(not_verified());
-    // `--quiet` must not hide why the verdict is incomplete.
-    let out = agenvil(&dir)
-        .args(["check", "--quiet", "--format", "json"])
+        .stderr(predicate::str::contains("cannot verify AG006"));
+    // `off` is not a selection.
+    write(
+        &dir,
+        "agenvil.toml",
+        format!("{CONFIG}[rules]\nAG006 = \"off\"\n"),
+    );
+    agenvil(&dir)
+        .arg("check")
         .assert()
-        .code(4)
-        .stderr(not_verified())
-        .get_output()
-        .stdout
-        .clone();
-    let json: Value = serde_json::from_slice(&out).unwrap();
-    assert_eq!(json["findings"], json!([]));
-
-    // Turning the deferred rules off in the config is the other way to an implemented-only run.
-    let off: String = deferred()
-        .split(',')
-        .map(|id| format!("{id} = \"off\"\n"))
-        .collect();
-    write(&dir, "agenvil.toml", format!("{CONFIG}[rules]\n{off}"));
-    agenvil(&dir).arg("check").assert().code(0);
+        .code(0)
+        .stderr(predicate::str::contains("AG006").not());
 }
 
 #[test]
@@ -192,6 +203,78 @@ fn ag001_requires_every_key_and_a_matching_name() {
         ),
         (1, Some(2), Some(1))
     );
+}
+
+#[test]
+fn ag001_name_and_description_must_be_non_empty_strings() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        &dir,
+        "agenvil.toml",
+        "schema = 1\n[project]\nname = \"demo\"\n",
+    );
+    for (field, line) in [
+        ("description: \"\"", Some(3)),
+        ("description: \"  \"", Some(3)),
+        ("description: 123", Some(3)),
+        ("description: null", None),
+    ] {
+        write(
+            &dir,
+            "agents/reviewer.md",
+            format!("---\nname: reviewer\n{field}\n---\nBody\n"),
+        );
+        let (code, json) = check(&dir, &["--only", "AG001"]);
+        assert_eq!(code, 1, "{field}: {json}");
+        assert_eq!(
+            found(&json),
+            [("AG001".to_owned(), "agents/reviewer.md".to_owned(), line)],
+            "{field}: {json}"
+        );
+    }
+    write(
+        &dir,
+        "agents/reviewer.md",
+        "---\nname: 7\ndescription: Reviews\n---\nBody\n",
+    );
+    assert_finds(&dir, "AG001", "agents/reviewer.md", Some(2));
+}
+
+#[test]
+fn null_model_and_effort_are_inherited_even_with_allowlists() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        &dir,
+        "agenvil.toml",
+        "schema = 1\n[project]\nname = \"demo\"\n[policy.models.claude]\nmodels = [\"sonnet\"]\nefforts = [\"medium\"]\n",
+    );
+    write(
+        &dir,
+        "agents/reviewer.md",
+        "---\nname: reviewer\ndescription: Reviews\nmodel: null\neffort:\n---\nBody\n",
+    );
+    let (code, json) = check(&dir, &["--only", "AG001,AG002,AG003,AG004"]);
+    assert_eq!((code, ids(&json)), (0, Vec::<String>::new()), "{json}");
+}
+
+#[test]
+fn skip_wins_over_only_for_rule_prerequisites() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        &dir,
+        "agenvil.toml",
+        "schema = 1\n[project]\nname = \"demo\"\n",
+    );
+    write(
+        &dir,
+        "agents/reviewer.md",
+        "---\nname: reviewer\ndescription: Reviews\n---\nBody\n",
+    );
+    for skipped in ["PO001", "CF001", "HY001", "HY002"] {
+        let only = format!("AG001,{skipped}");
+        let (code, json) = check(&dir, &["--only", &only, "--skip", skipped]);
+        assert_eq!(code, 0, "{skipped}: {json}");
+    }
 }
 
 #[test]
@@ -280,13 +363,36 @@ fn ag005_requires_a_non_empty_list() {
 #[test]
 fn model_policy_is_configurable() {
     let dir = clean();
+    write(&dir, "POLICY.md", POLICY.replace("| opus |", "| sonnet |"));
+    write(
+        &dir,
+        "agents/reviewer.md",
+        AGENT.replace("model: opus", "model: sonnet"),
+    );
+    write(
+        &dir,
+        "agenvil.toml",
+        format!("{CONFIG}[policy.models.claude]\nmodels = [\"opus\"]\n"),
+    );
+    assert_eq!(check(&dir, &["--only", "AG002"]).0, 1);
+    write(
+        &dir,
+        "agenvil.toml",
+        format!(
+            "{CONFIG}[policy.models.claude]\nmodels = [\"sonnet\"]\npairs = [[\"sonnet\", \"high\"]]\n"
+        ),
+    );
+    assert_eq!(check(&dir, &[]).0, 0);
+}
+
+#[test]
+fn an_allowlist_never_makes_a_non_native_model_acceptable() {
+    let dir = clean();
     write(
         &dir,
         "agents/reviewer.md",
         AGENT.replace("model: opus", "model: custom"),
     );
-    write(&dir, "POLICY.md", POLICY.replace("| opus |", "| custom |"));
-    assert_eq!(check(&dir, &["--only", "AG002"]).0, 1);
     write(
         &dir,
         "agenvil.toml",
@@ -294,7 +400,14 @@ fn model_policy_is_configurable() {
             "{CONFIG}[policy.models.claude]\nmodels = [\"custom\"]\npairs = [[\"custom\", \"high\"]]\n"
         ),
     );
-    assert_eq!(check(&dir, &[]).0, 0);
+    let (code, json) = check(&dir, &["--only", "AG002"]);
+    assert_eq!(code, 1);
+    assert!(
+        json["findings"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("custom")
+    );
 }
 
 // -- SK001, SK002 ----------------------------------------------------------------------------
@@ -883,11 +996,11 @@ fn deferred_rules_are_never_reported_as_passing() {
             .code(4)
             .stderr(predicate::str::contains(id).and(predicate::str::contains("not implemented")));
     }
-    // Part of a normal run: still no verdict, never silently counted as passing.
+    // Part of a normal run: reported as not run, never counted as passing, and not a failure.
     agenvil(&dir)
         .arg("check")
         .assert()
-        .code(4)
+        .code(0)
         .stderr(predicate::str::contains("AG006").and(predicate::str::contains("SK003")));
 }
 
@@ -915,7 +1028,7 @@ fn fast_excludes_sk002_and_cf003_and_rejects_naming_them() {
     agenvil(&dir)
         .args(["check", "--fast"])
         .assert()
-        .code(4)
+        .code(0)
         .stderr(predicate::str::contains("CF002").and(predicate::str::contains("CF003").not()));
 }
 

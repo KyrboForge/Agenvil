@@ -50,8 +50,8 @@ You review code changes.
 
 ### Declare a skill
 
-`skills/<name>/SKILL.md` plus any supporting files. `name` in the frontmatter is optional but, if
-present, must equal the directory name. `model` and `effort` are optional: a standard skill needs
+`skills/<name>/SKILL.md` plus any supporting files. `name` and `description` in the frontmatter are required and non-empty; `name` must equal
+the directory name. This is stricter than Claude Code, where skill `name` is optional. `model` and `effort` are optional: a standard skill needs
 neither. The whole directory is copied byte for byte (references, scripts, assets, binaries,
 nested directories); there is no templating.
 
@@ -80,8 +80,7 @@ source = ["opus", "xhigh"]
 target = ["opus", "high"]
 ```
 
-The source pair must also be allowed by `[policy.models.claude]` (the defaults are the five pairs
-listed in the README). A mapping only rewrites plain one-line `model: x` / `effort: y` entries; any
+The source pair must also be allowed by `[policy.models.claude]` when a pair allowlist is configured. A mapping only rewrites plain one-line `model: x` / `effort: y` entries; any
 other shape (flow style, duplicates) is refused rather than guessed, and the rewritten file is
 parsed again before it is written.
 

@@ -8,7 +8,7 @@
       "line": 4,
       "column": 1,
       "message": "`model: \"50%\"` is not allowed; allowed: `haiku`, `sonnet`, `opus`",
-      "fix": "Use an allowed model, or extend [policy.models.claude].models in agenvil.toml."
+      "fix": "Use a native Claude model, or one from [policy.models.claude].models in agenvil.toml."
     },
     {
       "id": "AG004",
@@ -17,7 +17,7 @@
       "line": 5,
       "column": 1,
       "message": "`model: 50%` with `effort: high` is not an allowed pair; allowed: `haiku+low`, `sonnet+medium`, `sonnet+high`, `opus+high`, `opus+xhigh`",
-      "fix": "Choose an allowed pair, or add the pair to [policy.models.claude].pairs."
+      "fix": "Choose a supported pair, add a [[targets.claude.map]] entry, or add the pair to [policy.models.claude].pairs."
     }
   ],
   "summary": {

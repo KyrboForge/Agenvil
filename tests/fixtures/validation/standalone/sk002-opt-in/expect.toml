@@ -1,0 +1,13 @@
+description = "SK002 is off by default and runs only when [rules] enables it"
+exit = 0
+golden = ["json"]
+
+[[findings]]
+id = "SK002"
+severity = "warning"
+path = "skills/tdd/SKILL.md"
+
+[[findings]]
+id = "SK002"
+severity = "warning"
+path = "skills/tdd/SKILL.md"
