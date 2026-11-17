@@ -1,3 +1,4 @@
 # Fixture bytes are the test: no line-ending or encoding conversion on any platform.
 tests/fixtures/** -text
 tests/golden/** -text
+tests/golden-build/** -text

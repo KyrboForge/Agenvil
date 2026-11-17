@@ -1,0 +1,13 @@
+schema = 1
+
+[project]
+name = "golden-models"
+
+[policy.models.claude]
+models = ["sonnet", "opus"]
+efforts = ["medium", "high", "xhigh"]
+pairs = [["sonnet", "medium"], ["opus", "high"], ["opus", "xhigh"]]
+
+[[targets.claude.map]]
+source = ["opus", "xhigh"]
+target = ["opus", "max"]

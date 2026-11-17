@@ -163,7 +163,7 @@ pub mod claude_values {
 
 /// Whether `model` is a value Claude Code accepts in frontmatter: an alias or a full `claude-*`
 /// model ID. Says nothing about whether that ID exists or what it supports.
-fn native_model(model: &str) -> Result<(), String> {
+pub fn native_model(model: &str) -> Result<(), String> {
     let full_id = model.strip_prefix("claude-").is_some_and(|rest| {
         !rest.is_empty()
             && rest
@@ -180,7 +180,7 @@ fn native_model(model: &str) -> Result<(), String> {
     }
 }
 
-fn native_effort(effort: &str) -> Result<(), String> {
+pub fn native_effort(effort: &str) -> Result<(), String> {
     if claude_values::EFFORTS.contains(&effort) {
         Ok(())
     } else {

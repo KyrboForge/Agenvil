@@ -11,6 +11,7 @@ dependencies = [
  "ignore",
  "predicates",
  "regex",
+ "rustix",
  "serde",
  "serde-saphyr",
  "serde_json",

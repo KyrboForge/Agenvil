@@ -7,6 +7,8 @@ pub mod diagnostics;
 pub mod discovery;
 pub mod frontmatter;
 pub mod inventory;
+pub mod manifest;
 pub mod report;
+pub mod stage;
 pub mod target;
 pub mod validate;

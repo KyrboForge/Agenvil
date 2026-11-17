@@ -50,6 +50,11 @@ jobs:
         run: cargo test --locked --test golden
       - name: Fixture compatibility suite and matrix check (no legacy oracle in CI)
         run: cargo test --locked --test compatibility
+      # Synthetic standalone fixtures only: build to a temp staging dir, validate, compare with the
+      # committed goldens, `build --check` passes, mutate a file, `build --check` fails and the
+      # tree is unchanged. Needs no TAK infrastructure, Claude session or credentials.
+      - name: Build end-to-end (goldens, drift check, adversarial cases)
+        run: cargo test --locked --test build_golden --test stage
       - run: cargo build --locked
 
   audit:
