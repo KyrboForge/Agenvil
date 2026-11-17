@@ -94,8 +94,19 @@ impl Project {
         Manifest::parse(&fs::read(self.out().join(manifest::FILE)).unwrap()).unwrap()
     }
 
+    fn check(&self) -> assert_cmd::assert::Assert {
+        let result = agenvil_in(self.dir.path(), self.home.path())
+            .arg("check")
+            .assert();
+        assert_eq!(snapshot(self.home.path()), [], "HOME was modified");
+        result
+    }
+
     fn rejects_source(&self, code: i32, message: &str) {
         self.run(&[]).code(code).stderr(
+            predicate::str::contains("instructions").and(predicate::str::contains(message)),
+        );
+        self.check().code(code).stderr(
             predicate::str::contains("instructions").and(predicate::str::contains(message)),
         );
         assert!(!self.out().exists(), "failed build created output");
@@ -215,6 +226,13 @@ fn two_builds_produce_identical_instruction_trees_and_manifests() {
     assert_eq!(snapshot(&p.path("second")), first);
     p.run(&[]).success();
     assert_eq!(snapshot(&p.out()), first);
+}
+
+#[test]
+fn valid_instructions_pass_check() {
+    let p = Project::configured();
+    p.check().success();
+    p.run(&[]).success();
 }
 
 #[test]

@@ -291,7 +291,7 @@ Manifest files are sorted bytewise, so `.claude/…` entries come before `CLAUDE
 
 ### Source validation
 
-The source file must:
+Both `agenvil check` and `agenvil build` validate the configured source file. It must:
 
 - exist (a configured-but-missing file is an error, never silently skipped or treated as empty)
 - be a regular file, not a directory or special file
@@ -299,7 +299,8 @@ The source file must:
 - be at most 1 MiB
 - have no symlink in any path component
 - not be inside the agents, skills or rules directories (they are distinct concepts)
-- not be inside the output directory
+
+The build also requires the source to be outside the output directory.
 
 All failures use the existing source diagnostics. There is no templating,
 interpolation or import resolution: `@path` imports that Claude Code's own tooling follows inside

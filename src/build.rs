@@ -341,7 +341,7 @@ fn plan(root: &Path, config: &Config, inventory: &Inventory) -> Result<Vec<Entry
 /// The project-root `CLAUDE.md`, copied byte for byte from the configured source. Nothing in it is
 /// interpreted: no templating, no `@import` resolution. A missing, unsafe or unreadable source is
 /// a failure, never an empty file. `Err(Ok(_))` is a source-model error, `Err(Err(_))` an input one.
-fn instructions(
+pub(crate) fn instructions(
     root: &Path,
     config: &Config,
     source: &Path,
@@ -413,11 +413,15 @@ fn instructions(
             &format!("larger than the {max}-byte limit"),
         )
     };
-    let mut bytes = Vec::new();
-    let read = File::open(&path).and_then(|f| f.take(max + 1).read_to_end(&mut bytes));
-    if let Err(e) = read {
-        return problem(ProblemKind::Unreadable, &e.kind().to_string());
-    }
+    let bytes = match stage::read_under_root(root, &shown, max + 1) {
+        Ok(bytes) => bytes,
+        Err(kind) => {
+            return problem(
+                kind,
+                "the file changed while it was read; nothing was copied",
+            );
+        }
+    };
     if bytes.len() as u64 > max {
         return too_large();
     }

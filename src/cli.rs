@@ -224,7 +224,17 @@ fn execute(cli: &Cli) -> Result<(), Error> {
             };
             let plan = Plan::new(&config, &options)?;
             let inventory = Inventory::build(root, &config, &Limits::default())?;
-            let outcome = validate::run(root, &config, &inventory, &plan);
+            let mut outcome = validate::run(root, &config, &inventory, &plan);
+            if let Some(source) = &config.paths.instructions {
+                match build::instructions(root, &config, source.as_path(), &build::limits()) {
+                    Ok(_) => {}
+                    Err(Ok(issue)) => return Err(build::Error::Invalid(vec![issue]).into()),
+                    Err(Err(problem)) => {
+                        outcome.problems.push(problem);
+                        outcome.problems.sort();
+                    }
+                }
+            }
             let findings = &outcome.findings;
             match format {
                 CheckFormat::Human => print!("{}", report::human(findings, *quiet)),

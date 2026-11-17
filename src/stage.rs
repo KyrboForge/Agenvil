@@ -630,6 +630,8 @@ fn apply_cleanup(
     Ok(root.replace(manifest::FILE, json.as_bytes())?)
 }
 
+pub(crate) use pinned::read_under_root;
+
 /// Destructive cleanup steps that cannot be redirected outside the staging directory, even if
 /// it, a directory above it or one inside it is swapped for a symlink or junction while they run.
 #[cfg(unix)]
@@ -638,6 +640,8 @@ mod pinned {
     use std::io::{self, Read, Write};
     use std::os::fd::OwnedFd;
     use std::path::{Component, Path};
+
+    use crate::diagnostics::ProblemKind;
 
     use rustix::fs::{AtFlags, CWD, Mode, OFlags, fstat, openat, renameat, statat, unlinkat};
     use rustix::io::Errno;
@@ -650,6 +654,67 @@ mod pinned {
         .union(OFlags::NOFOLLOW)
         .union(OFlags::NONBLOCK)
         .union(OFlags::CLOEXEC);
+
+    /// Resolve only the trusted root normally, then open each descendant without following links.
+    pub(crate) fn read_under_root(
+        root: &Path,
+        rel: &str,
+        limit: u64,
+    ) -> Result<Vec<u8>, ProblemKind> {
+        let (dirs, name) = rel.rsplit_once('/').unwrap_or(("", rel));
+        let classify = |e| match e {
+            rustix::io::Errno::LOOP => ProblemKind::Symlink,
+            _ => ProblemKind::Unreadable,
+        };
+        let mut parent =
+            openat(CWD, root, DIR - OFlags::NOFOLLOW, Mode::empty()).map_err(classify)?;
+        for part in dirs.split('/').filter(|part| !part.is_empty()) {
+            parent = openat(&parent, part, DIR, Mode::empty()).map_err(classify)?;
+        }
+        let fd = openat(&parent, name, FILE, Mode::empty()).map_err(classify)?;
+        if rustix::fs::FileType::from_raw_mode(fstat(&fd).map_err(classify)?.st_mode)
+            != rustix::fs::FileType::RegularFile
+        {
+            return Err(ProblemKind::Unreadable);
+        }
+        let mut bytes = Vec::new();
+        File::from(fd)
+            .take(limit)
+            .read_to_end(&mut bytes)
+            .map_err(|_| ProblemKind::Unreadable)?;
+        Ok(bytes)
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn pinned_reads_allow_root_aliases_but_reject_link_and_fifo_leaves() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let root = dir.path().join("alias");
+        std::fs::create_dir(&project).unwrap();
+        std::os::unix::fs::symlink(&project, &root).unwrap();
+        std::fs::write(project.join("source"), b"content").unwrap();
+        assert_eq!(read_under_root(&root, "source", 4).unwrap(), b"cont");
+        std::os::unix::fs::symlink("source", project.join("link")).unwrap();
+        assert_eq!(read_under_root(&root, "link", 8), Err(ProblemKind::Symlink));
+        std::os::unix::fs::symlink(&project, project.join("parent")).unwrap();
+        assert!(read_under_root(&root, "parent/source", 8).is_err());
+        // Rustix does not expose mkfifoat on Apple platforms.
+        #[cfg(target_vendor = "apple")]
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(project.join("fifo"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        #[cfg(not(target_vendor = "apple"))]
+        rustix::fs::mkfifoat(CWD, project.join("fifo"), Mode::RUSR).unwrap();
+        assert_eq!(
+            read_under_root(&root, "fifo", 8),
+            Err(ProblemKind::Unreadable)
+        );
+    }
 
     /// Opening a component that is no longer a plain directory or file, or is gone.
     fn moved(e: Errno) -> bool {
@@ -765,11 +830,64 @@ mod pinned {
     use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
     use std::path::{Component, Path, PathBuf};
 
+    use crate::diagnostics::ProblemKind;
+
     const FILE_SHARE_READ: u32 = 0x1;
     const FILE_SHARE_WRITE: u32 = 0x2;
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
     const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+
+    fn open_pin(path: &Path, share: u32, flags: u32) -> io::Result<File> {
+        OpenOptions::new()
+            .read(true)
+            .share_mode(share)
+            .custom_flags(flags)
+            .open(path)
+    }
+
+    /// Hold the root and every parent so descendants cannot be redirected during the read.
+    pub(crate) fn read_under_root(
+        root: &Path,
+        rel: &str,
+        limit: u64,
+    ) -> Result<Vec<u8>, ProblemKind> {
+        let unreadable = |_| ProblemKind::Unreadable;
+        let mut path = fs::canonicalize(root).map_err(unreadable)?;
+        let share_dir = FILE_SHARE_READ | FILE_SHARE_WRITE;
+        let flags = FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS;
+        let root_pin = pin(&path, true)
+            .map_err(unreadable)?
+            .ok_or(ProblemKind::Unreadable)?;
+        let mut parents = vec![root_pin];
+        let mut parts = rel.split('/').peekable();
+        while let Some(part) = parts.next() {
+            path.push(part);
+            let dir = parts.peek().is_some();
+            let share = if dir { share_dir } else { FILE_SHARE_READ };
+            let file = open_pin(&path, share, flags).map_err(unreadable)?;
+            let meta = file.metadata().map_err(unreadable)?;
+            if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(ProblemKind::Symlink);
+            }
+            if dir {
+                if !meta.is_dir() {
+                    return Err(ProblemKind::Unreadable);
+                }
+                parents.push(file);
+            } else {
+                if !meta.is_file() {
+                    return Err(ProblemKind::Unreadable);
+                }
+                let mut bytes = Vec::new();
+                file.take(limit)
+                    .read_to_end(&mut bytes)
+                    .map_err(unreadable)?;
+                return Ok(bytes);
+            }
+        }
+        Err(ProblemKind::Unreadable)
+    }
 
     /// `path` itself (never a link's target), held so it cannot be moved or written; `None` if
     /// it is a link or not the expected kind.
@@ -782,12 +900,7 @@ mod pinned {
         } else {
             (FILE_SHARE_READ, FILE_FLAG_OPEN_REPARSE_POINT)
         };
-        let file = match OpenOptions::new()
-            .read(true)
-            .share_mode(share)
-            .custom_flags(flags)
-            .open(path)
-        {
+        let file = match open_pin(path, share, flags) {
             Ok(file) => file,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
