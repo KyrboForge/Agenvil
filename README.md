@@ -165,10 +165,13 @@ enabled = true
 Resulting tree: `.generated/claude/{manifest.json, CLAUDE.md, .claude/{agents,skills,rules}}`.
 
 ```sh
-agenvil check                                    # validate sources
+agenvil check                                    # validate agents, skills and rules (not instructions)
 agenvil build --target claude                    # build the staging tree
 agenvil build --target claude --check            # compare staging tree with sources (read-only)
 ```
+
+`agenvil check` does not read the instructions source; `build` validates it (existence, regular
+UTF-8 file, no symlinks, size limit).
 
 See [`docs/build.md#project-instructions-claudemd`](docs/build.md#project-instructions-claudemd)
 for source validation rules, manifest format, `--check`/`--clean` behaviour, and the distinction

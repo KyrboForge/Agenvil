@@ -30,9 +30,11 @@ today.
 ### Why the same source file is not guaranteed to be semantically correct for all targets
 
 Each harness defines its own instruction format, scope, loading order and limits. Claude Code reads
-`./CLAUDE.md` as project context; Codex reads and concatenates `AGENTS.md` files from the
-filesystem root down to the cwd (closer files win, capped at 32 KiB by default). Discovery,
-precedence, scope and size semantics differ.
+`./CLAUDE.md` as project context; Codex loads global instructions from `~/.codex` separately,
+then walks from the project root down to the working directory, selecting at most one file per
+directory (an override file takes precedence over `AGENTS.md`) and capping the combined size at
+32 KiB by default. Instructions outside the project, including above its root, are not
+inherited. Discovery, precedence, scope and size semantics differ.
 
 Copying Claude-specific text (slash commands, `@`-import paths, Claude-specific tool references)
 into an `AGENTS.md` is therefore **not** assumed to be semantically correct. The source file should
