@@ -184,14 +184,17 @@ no `~/.claude` and no HOME data) is ever a candidate. An `unsafe` finding or an 
 **blocks** the whole cleanup with nothing deleted (`cleanup blocked`). The manifest is rewritten
 atomically afterwards. A manifest entry is an ownership claim, never authorization to delete.
 
-Concurrent changes: each delete walks from a handle on `--out`, one directory at a time, never
-following a link, and checks the size and digest of the open file before deleting it. On Unix
-every step is relative to the parent's handle (`openat`/`unlinkat` with no-follow) and the name
-must still be the verified file when it is unlinked. On Windows every directory on the way is held
-open without delete sharing, so it cannot be renamed or replaced, and is checked not to be a
-symlink or junction. If anything on the way changed since the scan, cleanup stops
-(`changed during cleanup`) with nothing more deleted. Swapping a directory for a link while cleanup
-runs cannot redirect a delete outside `--out`. The manifest is rewritten through the same handle.
+Concurrent changes: `--out` is resolved once and the scan and the deletes both use that resolved
+path. Each delete walks to it from the filesystem root, one directory at a time, never following a
+link, then re-reads `manifest.json` from that directory and requires it to equal the scanned one,
+so a directory swapped in after the scan is never trusted. It checks the size and digest of the
+open file before deleting it. On Unix every step is relative to the parent's handle
+(`openat`/`unlinkat` with no-follow) and the name must still be the verified file when it is
+unlinked. On Windows every directory from the drive root down is held open without delete sharing,
+so it cannot be renamed or replaced, and is checked not to be a symlink or junction. If anything on
+the way changed since the scan, cleanup stops (`changed during cleanup`) with nothing more deleted.
+Swapping `--out`, a directory above it or one inside it for a link while cleanup runs cannot
+redirect a delete elsewhere. The manifest is rewritten through the same handle.
 
 ## Output
 

@@ -530,7 +530,10 @@ pub fn clean(
     if !build::location(root, config, out)? {
         return Ok(Ok(Cleanup::default()));
     }
-    let tree = scan(out)?;
+    // Resolved once and validated again: the delete below opens exactly this path, link-free.
+    let real = fs::canonicalize(out)?;
+    build::location(root, config, &real)?;
+    let tree = scan(&real)?;
     let manifest = match load_manifest(&tree) {
         Ok(m) => m,
         Err(blockers) => return Ok(Err(sorted(blockers))),
@@ -560,18 +563,45 @@ pub fn clean(
     plan_out.forget.sort();
     plan_out.keep.sort();
     if apply {
-        apply_cleanup(out, &manifest, &plan_out)?;
+        let Some(Node::File(claimed)) = tree.nodes.get(manifest::FILE) else {
+            unreachable!("a manifest was loaded from the tree");
+        };
+        apply_cleanup(out, &real, claimed, &manifest, &plan_out)?;
     }
     Ok(Ok(plan_out))
 }
 
-fn apply_cleanup(out: &Path, manifest: &Manifest, cleanup: &Cleanup) -> Result<(), Error> {
+/// Deletes `cleanup.remove` under `real` (the resolved `out`), whose scanned manifest was
+/// `claimed`. Stops at the first path that no longer matches, with nothing more deleted.
+fn apply_cleanup(
+    out: &Path,
+    real: &Path,
+    claimed: &[u8],
+    manifest: &Manifest,
+    cleanup: &Cleanup,
+) -> Result<(), Error> {
+    let changed = |what: &str| {
+        Error::Out(
+            out.to_path_buf(),
+            format!("{what} changed during cleanup; nothing more was deleted"),
+        )
+    };
+    let Some(root) = pinned::Root::open(real)? else {
+        return Err(changed("the path to the staging directory"));
+    };
+    // The ownership claims must come from the pinned directory, not one swapped in for the scan.
+    if root
+        .read(manifest::FILE, claimed.len() as u64 + 1)?
+        .as_deref()
+        != Some(claimed)
+    {
+        return Err(changed(&format!("`{}`", manifest::FILE)));
+    }
     let owned: BTreeMap<&str, &manifest::File> = manifest
         .files
         .iter()
         .map(|f| (f.path.as_str(), f))
         .collect();
-    let root = pinned::Root::open(out)?;
     for path in &cleanup.remove {
         let m = owned[path.as_str()];
         // Checked again right before the delete: the tree may have changed since the scan.
@@ -585,10 +615,7 @@ fn apply_cleanup(out: &Path, manifest: &Manifest, cleanup: &Cleanup) -> Result<(
             Ok(manifest::sha256(&bytes) == m.sha256)
         })?;
         if !still_owned {
-            return Err(Error::Out(
-                out.to_path_buf(),
-                format!("`{path}` changed during cleanup; nothing more was deleted"),
-            ));
+            return Err(changed(&format!("`{path}`")));
         }
     }
     let dropped: BTreeSet<&str> = cleanup
@@ -604,13 +631,13 @@ fn apply_cleanup(out: &Path, manifest: &Manifest, cleanup: &Cleanup) -> Result<(
 }
 
 /// Destructive cleanup steps that cannot be redirected outside the staging directory, even if
-/// a directory inside it is swapped for a symlink or junction while they run.
+/// it, a directory above it or one inside it is swapped for a symlink or junction while they run.
 #[cfg(unix)]
 mod pinned {
     use std::fs::File;
-    use std::io::{self, Write};
+    use std::io::{self, Read, Write};
     use std::os::fd::OwnedFd;
-    use std::path::Path;
+    use std::path::{Component, Path};
 
     use rustix::fs::{AtFlags, CWD, Mode, OFlags, fstat, openat, renameat, statat, unlinkat};
     use rustix::io::Errno;
@@ -618,6 +645,10 @@ mod pinned {
     const DIR: OFlags = OFlags::RDONLY
         .union(OFlags::DIRECTORY)
         .union(OFlags::NOFOLLOW)
+        .union(OFlags::CLOEXEC);
+    const FILE: OFlags = OFlags::RDONLY
+        .union(OFlags::NOFOLLOW)
+        .union(OFlags::NONBLOCK)
         .union(OFlags::CLOEXEC);
 
     /// Opening a component that is no longer a plain directory or file, or is gone.
@@ -630,8 +661,35 @@ mod pinned {
     pub struct Root(OwnedFd);
 
     impl Root {
-        pub fn open(out: &Path) -> io::Result<Self> {
-            Ok(Self(openat(CWD, out, DIR, Mode::empty())?))
+        /// Opens the resolved, absolute `out` from `/`, one component at a time, never following
+        /// a link. `None`: a directory on the way is no longer one.
+        pub fn open(out: &Path) -> io::Result<Option<Self>> {
+            let mut dir = openat(CWD, "/", DIR, Mode::empty())?;
+            for part in out.components() {
+                if let Component::Normal(part) = part {
+                    dir = match openat(&dir, part, DIR, Mode::empty()) {
+                        Ok(fd) => fd,
+                        Err(e) if moved(e) => return Ok(None),
+                        Err(e) => return Err(e.into()),
+                    };
+                }
+            }
+            Ok(Some(Self(dir)))
+        }
+
+        /// At most `limit` bytes of `name`, a plain file directly in the root; `None` if it is not one.
+        pub fn read(&self, name: &str, limit: u64) -> io::Result<Option<Vec<u8>>> {
+            let file = match openat(&self.0, name, FILE, Mode::empty()) {
+                Ok(fd) => File::from(fd),
+                Err(e) if moved(e) => return Ok(None),
+                Err(e) => return Err(e.into()),
+            };
+            if !file.metadata()?.is_file() {
+                return Ok(None);
+            }
+            let mut bytes = Vec::new();
+            file.take(limit).read_to_end(&mut bytes)?;
+            Ok(Some(bytes))
         }
 
         /// Deletes `rel` if `verify` accepts the open file, then prunes the directories that
@@ -652,8 +710,7 @@ mod pinned {
                 }
             }
             let parent = chain.last().unwrap_or(&self.0);
-            let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
-            let file = match openat(parent, *name, flags, Mode::empty()) {
+            let file = match openat(parent, *name, FILE, Mode::empty()) {
                 Ok(fd) => File::from(fd),
                 Err(e) if moved(e) => return Ok(false),
                 Err(e) => return Err(e.into()),
@@ -698,15 +755,15 @@ mod pinned {
 }
 
 /// Windows has no `openat`, but a directory opened without `FILE_SHARE_DELETE` cannot be
-/// renamed, deleted or replaced while the handle is held. Every directory on the way is opened
-/// that way and checked not to be a reparse point (symlink or junction), so a path below them
-/// cannot leave the staging directory.
+/// renamed, deleted or replaced while the handle is held. Every directory from the drive root to
+/// the file is opened that way and checked not to be a reparse point (symlink or junction), so
+/// the path cannot lead anywhere else.
 #[cfg(windows)]
 mod pinned {
     use std::fs::{self, File, OpenOptions};
-    use std::io::{self, Write};
+    use std::io::{self, Read, Write};
     use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
-    use std::path::{Path, PathBuf};
+    use std::path::{Component, Path, PathBuf};
 
     const FILE_SHARE_READ: u32 = 0x1;
     const FILE_SHARE_WRITE: u32 = 0x2;
@@ -743,20 +800,36 @@ mod pinned {
 
     pub struct Root {
         path: PathBuf,
-        _pin: File,
+        _pins: Vec<File>,
     }
 
     impl Root {
-        pub fn open(out: &Path) -> io::Result<Self> {
-            match pin(out, true)? {
-                Some(pin) => Ok(Self {
-                    path: out.to_path_buf(),
-                    _pin: pin,
-                }),
-                None => Err(io::Error::other(
-                    "the staging directory is not a plain directory",
-                )),
+        /// Pins the resolved, absolute `out` and every directory above it. `None`: one of them
+        /// is no longer a plain directory.
+        pub fn open(out: &Path) -> io::Result<Option<Self>> {
+            let mut path = PathBuf::new();
+            let mut pins = Vec::new();
+            for part in out.components() {
+                path.push(part);
+                if matches!(part, Component::Prefix(_)) {
+                    continue;
+                }
+                match pin(&path, true)? {
+                    Some(pin) => pins.push(pin),
+                    None => return Ok(None),
+                }
             }
+            Ok(Some(Self { path, _pins: pins }))
+        }
+
+        /// At most `limit` bytes of `name`, a plain file directly in the root; `None` if it is not one.
+        pub fn read(&self, name: &str, limit: u64) -> io::Result<Option<Vec<u8>>> {
+            let Some(file) = pin(&self.path.join(name), false)? else {
+                return Ok(None);
+            };
+            let mut bytes = Vec::new();
+            file.take(limit).read_to_end(&mut bytes)?;
+            Ok(Some(bytes))
         }
 
         /// Deletes `rel` if `verify` accepts the open file, then prunes the directories that
@@ -1316,47 +1389,47 @@ mod tests {
         );
     }
 
-    /// A directory or the file itself swapped for a symlink after the plan was made must not
-    /// lead the delete outside the staging directory, even to an identical file.
+    /// A directory above `--out`, `--out` itself, a directory inside it or the file swapped for a
+    /// symlink after the plan was made must not lead the delete elsewhere, even to an identical
+    /// tree.
     #[cfg(unix)]
     #[test]
     fn cleanup_never_follows_a_link_swapped_in_after_the_plan() {
-        for swapped in [".claude/agents", ".claude/agents/old.md"] {
-            let dir = tempfile::tempdir().unwrap();
-            let outside = tempfile::tempdir().unwrap();
+        const STAGE: &str = "parent/stage";
+        for swapped in [
+            "parent",
+            STAGE,
+            "parent/stage/.claude/agents",
+            "parent/stage/.claude/agents/old.md",
+        ] {
+            let (base, outside) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
             let old = [entry(".claude/agents/old.md", AGENT)];
-            write(dir.path(), &old);
-            let manifest = load_manifest(&scan(dir.path()).unwrap()).unwrap();
+            write(&join(base.path(), STAGE), &old);
+            write(&join(outside.path(), STAGE), &old);
+            let real = fs::canonicalize(join(base.path(), STAGE)).unwrap();
+            let claimed = fs::read(real.join(manifest::FILE)).unwrap();
+            let manifest = load_manifest(&scan(&real).unwrap()).unwrap();
             let cleanup = Cleanup {
                 remove: vec![".claude/agents/old.md".to_owned()],
                 ..Cleanup::default()
             };
-            write(outside.path(), &[entry("agents/old.md", AGENT)]);
-            let target = if swapped.ends_with(".md") {
-                outside.path().join("agents/old.md")
-            } else {
-                outside.path().join("agents")
-            };
-            let link = join(dir.path(), swapped);
+            let link = join(base.path(), swapped);
             if link.is_dir() {
                 fs::remove_dir_all(&link).unwrap();
             } else {
                 fs::remove_file(&link).unwrap();
             }
-            std::os::unix::fs::symlink(&target, &link).unwrap();
-            let before = fs::read(dir.path().join(manifest::FILE)).unwrap();
+            std::os::unix::fs::symlink(join(outside.path(), swapped), &link).unwrap();
 
-            let err = apply_cleanup(dir.path(), &manifest, &cleanup).unwrap_err();
+            let err = apply_cleanup(&real, &real, &claimed, &manifest, &cleanup).unwrap_err();
             assert!(
                 err.to_string().contains("changed during cleanup"),
                 "{swapped}: {err}"
             );
-            assert!(outside.path().join("agents/old.md").is_file(), "{swapped}");
-            assert!(
-                fs::symlink_metadata(&link).unwrap().is_symlink(),
-                "{swapped}"
-            );
-            assert_eq!(fs::read(dir.path().join(manifest::FILE)).unwrap(), before);
+            let kept = join(outside.path(), "parent/stage/.claude/agents/old.md");
+            assert!(kept.is_file(), "{swapped}");
+            let outside_manifest = join(outside.path(), STAGE).join(manifest::FILE);
+            assert_eq!(fs::read(outside_manifest).unwrap(), claimed, "{swapped}");
         }
     }
 }
