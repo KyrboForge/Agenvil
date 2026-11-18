@@ -180,7 +180,16 @@ fn remove_value(out: &mut Outcome, record: &ValueRecord, prune: &mut BTreeSet<St
         self::op(out, op, EntryKind::Value, &record.pointer, None, owner, why);
     };
     match lookup(&out.document, &parts) {
-        Err(Clash) | Ok(None) => value(OperationKind::Remove, Ownership::Absent, Reason::Gone, out),
+        Err(Clash) => {
+            value(
+                OperationKind::Conflict,
+                Ownership::Mismatch,
+                Reason::TypeClash,
+                out,
+            );
+            out.values.push(record.clone());
+        }
+        Ok(None) => value(OperationKind::Remove, Ownership::Absent, Reason::Gone, out),
         Ok(Some(current)) if *current == record.value => {
             match &record.previous {
                 Some(previous) => {
@@ -241,16 +250,13 @@ fn set_hook(
             out.hooks.push(record.clone());
             return;
         };
-        let Some(index) = old.iter().position(|group| *group == record.group) else {
-            // Any recorded group that is not exactly there is user drift: edited or removed.
-            let why = if old.iter().any(|group| overlaps(group, &record.group)) {
-                Reason::HookModified
-            } else {
-                Reason::UserRemoved
-            };
-            report(Conflict, Ownership::Mismatch, why, out);
-            out.hooks.push(record.clone());
-            return;
+        let index = match recorded_group_index(old, &record.group) {
+            Ok(index) => index,
+            Err(why) => {
+                report(Conflict, Ownership::Mismatch, why, out);
+                out.hooks.push(record.clone());
+                return;
+            }
         };
         if record.event == hook.event && record.group == hook.group {
             report(Noop, Ownership::Managed, Reason::Current, out);
@@ -319,7 +325,7 @@ fn remove_hook(out: &mut Outcome, record: &HookRecord, prune: &mut BTreeSet<Stri
             why,
         );
     };
-    let Ok(current) = groups(&out.document, &record.event).map(<[Value]>::to_vec) else {
+    let Ok(current) = groups(&out.document, &record.event) else {
         report(
             OperationKind::Conflict,
             Ownership::Mismatch,
@@ -329,25 +335,37 @@ fn remove_hook(out: &mut Outcome, record: &HookRecord, prune: &mut BTreeSet<Stri
         out.hooks.push(record.clone());
         return;
     };
-    if let Some(index) = current.iter().position(|group| *group == record.group) {
-        array(&mut out.document, &record.event, &mut Vec::new()).remove(index);
-        prune.extend(record.created.iter().cloned());
-        report(
-            OperationKind::Remove,
-            Ownership::Managed,
-            Reason::Obsolete,
-            out,
-        );
-    } else if current.iter().any(|group| overlaps(group, &record.group)) {
-        report(
-            OperationKind::Conflict,
-            Ownership::Mismatch,
-            Reason::HookModified,
-            out,
-        );
-        out.hooks.push(record.clone());
-    } else {
-        report(OperationKind::Remove, Ownership::Absent, Reason::Gone, out);
+    match recorded_group_index(current, &record.group) {
+        Ok(index) => {
+            array(&mut out.document, &record.event, &mut Vec::new()).remove(index);
+            prune.extend(record.created.iter().cloned());
+            report(
+                OperationKind::Remove,
+                Ownership::Managed,
+                Reason::Obsolete,
+                out,
+            );
+        }
+        Err(Reason::UserRemoved) => {
+            report(OperationKind::Remove, Ownership::Absent, Reason::Gone, out);
+        }
+        Err(why) => {
+            report(OperationKind::Conflict, Ownership::Mismatch, why, out);
+            out.hooks.push(record.clone());
+        }
+    }
+}
+
+fn recorded_group_index(groups: &[Value], recorded: &Value) -> Result<usize, Reason> {
+    let mut exact = groups
+        .iter()
+        .enumerate()
+        .filter(|(_, group)| *group == recorded);
+    match (exact.next(), exact.next()) {
+        (Some(_), Some(_)) => Err(Reason::HookDuplicate),
+        (Some((index, _)), None) => Ok(index),
+        _ if groups.iter().any(|group| overlaps(group, recorded)) => Err(Reason::HookModified),
+        _ => Err(Reason::UserRemoved),
     }
 }
 

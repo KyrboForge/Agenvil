@@ -53,9 +53,10 @@ Values are compared as parsed JSON, so key order and formatting do not matter.
 Pruning never touches a value Agenvil still manages or anything below it, so replacing `/a/b` with
 an object at `/a` keeps `/a` and the empty objects inside it.
 
-A new hook group is appended to its event array. Agenvil finds its own group again by exact
-equality with the recorded group. It updates the group in place, or moves it when the event
-changes. A recorded group that is not exactly there is user drift and a conflict: a group sharing a
+A new hook group is appended to its event array. Agenvil requires a single exact match for a
+recorded group. Multiple exact matches cause a `hook_duplicate` conflict on install and uninstall.
+Agenvil updates the group in place or moves it when the event changes.
+A recorded group that is not exactly there is user drift and a conflict: a group sharing a
 command with it was edited (`hook_modified`, also when hooks were added to it), otherwise it was
 deleted (`user_removed`). On uninstall a deleted group just drops its record, while an edited one
 stays a conflict. A new, updated or moved group whose commands already appear in an unmanaged group

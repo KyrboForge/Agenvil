@@ -446,6 +446,49 @@ fn uninstall_drops_records_of_keys_already_gone_and_keeps_user_edits() {
 }
 
 #[test]
+fn uninstall_keeps_a_value_record_when_its_parent_is_no_longer_an_object() {
+    let home = Home::new();
+    let desired = fragment(json!({"schema": 1, "values": {"/permissions/defaultMode": "plan"}}));
+    home.install(&desired);
+    let installed = home.json();
+    home.write(r#"{"permissions":"off"}"#);
+    let before = home.bytes();
+    let recorded = home.state();
+
+    let plan = home.plan(None);
+    assert_eq!(
+        ops(&plan),
+        [(
+            OperationKind::Conflict,
+            "/permissions/defaultMode",
+            Reason::TypeClash
+        )]
+    );
+    assert_eq!(plan.operations[0].ownership, Ownership::Mismatch);
+    assert_eq!(plan.files.settings.action, FileAction::Unchanged);
+    assert_eq!(plan.files.state.action, FileAction::Unchanged);
+    assert!(matches!(
+        apply(&plan),
+        Err(ApplyError::Conflicts { count: 1 })
+    ));
+    assert_eq!(home.bytes(), before);
+    assert_eq!(home.state(), recorded);
+
+    home.write(&installed.to_string());
+    let removal = home.plan(None);
+    assert_eq!(
+        ops(&removal),
+        [(
+            OperationKind::Remove,
+            "/permissions/defaultMode",
+            Reason::Obsolete
+        )]
+    );
+    apply(&removal).unwrap();
+    assert_eq!(home.json(), json!({}));
+}
+
+#[test]
 fn invalid_documents_and_symlinks_are_refused_untouched() {
     let home = Home::new();
     for text in ["{\"a\":", "[1,2]", "null"] {
@@ -801,6 +844,59 @@ fn a_managed_hook_event_replaced_by_a_non_array_keeps_its_record() {
             Err(ApplyError::Conflicts { count: 1 })
         ));
     }
+}
+
+#[test]
+fn duplicate_managed_hook_groups_conflict_until_one_copy_is_removed() {
+    let home = Home::new();
+    let desired =
+        |event, command| fragment(json!({"schema": 1, "hooks": [hook("done", event, command)]}));
+    let original = desired("Stop", "done.sh");
+    let updated = desired("Stop", "updated.sh");
+    let moved = desired("PreToolUse", "done.sh");
+    home.install(&original);
+    let installed = home.json();
+    let mut doc = installed.clone();
+    let recorded_group = doc["hooks"]["Stop"][0].clone();
+    doc["hooks"]["Stop"]
+        .as_array_mut()
+        .unwrap()
+        .push(recorded_group);
+    home.write(&doc.to_string());
+    let before = home.bytes();
+    let recorded = home.state();
+
+    for desired in [Some(&updated), Some(&moved), Some(&original), None] {
+        let plan = home.plan(desired);
+        assert_eq!(
+            ops(&plan),
+            [(OperationKind::Conflict, "done", Reason::HookDuplicate)]
+        );
+        assert_eq!(plan.operations[0].ownership, Ownership::Mismatch);
+        assert_eq!(plan.files.settings.action, FileAction::Unchanged);
+        assert_eq!(plan.files.state.action, FileAction::Unchanged);
+        assert!(matches!(
+            apply(&plan),
+            Err(ApplyError::Conflicts { count: 1 })
+        ));
+        assert_eq!(home.bytes(), before);
+        assert_eq!(home.state(), recorded);
+    }
+
+    home.write(&installed.to_string());
+    let update = home.install(&updated);
+    assert_eq!(
+        ops(&update),
+        [(OperationKind::Change, "done", Reason::Changed)]
+    );
+    assert_eq!(home.json()["hooks"]["Stop"], json!([group("updated.sh")]));
+    let removal = home.plan(None);
+    assert_eq!(
+        ops(&removal),
+        [(OperationKind::Remove, "done", Reason::Obsolete)]
+    );
+    apply(&removal).unwrap();
+    assert_eq!(home.json(), json!({}));
 }
 
 #[test]
