@@ -44,23 +44,38 @@ Values are compared as parsed JSON, so key order and formatting do not matter.
 
 | Current value | Install | Uninstall (`--remove` or dropped from the fragment) |
 | --- | --- | --- |
-| absent | add it, recording any parent objects created | drop the record |
+| absent and not recorded | add it, recording any parent objects created | nothing to do |
+| absent but recorded (the user deleted it) | conflict | drop the record |
 | equal to the desired value but not recorded | adopt it: the record keeps the user's value as the previous value | the value stays |
 | equal to what Agenvil recorded | change it to the desired value, or leave it if unchanged | restore the previous value, or delete the key and prune now-empty parents Agenvil created |
 | anything else | conflict | conflict |
 
+Pruning never touches a value Agenvil still manages or anything below it, so replacing `/a/b` with
+an object at `/a` keeps `/a` and the empty objects inside it.
+
 A new hook group is appended to its event array. Agenvil finds its own group again by exact
 equality with the recorded group. It updates the group in place, or moves it when the event
-changes. A group with the recorded commands but other content is a user modification, and so is a
-conflict. If the commands of a new hook already appear in the event array, that is also a
-conflict. Unmanaged keys and groups keep their order. No Agenvil metadata is written into
-`settings.json`.
+changes. A recorded group that is not exactly there is user drift and a conflict: a group sharing a
+command with it was edited (`hook_modified`, also when hooks were added to it), otherwise it was
+deleted (`user_removed`). On uninstall a deleted group just drops its record, while an edited one
+stays a conflict. A new, updated or moved group whose commands already appear in an unmanaged group
+of its event, or in another hook of the fragment, is a conflict too, and so is a recorded event
+that is no longer an array. Unmanaged keys and groups keep their order. No Agenvil metadata is
+written into `settings.json`.
+
+Drift is never repaired silently. To re-adopt a value or group the user deleted, run `--remove`
+(which drops the stale record) and then install again; an edited value or group must be reverted
+or removed by hand first.
 
 `settings.json` is rewritten with two-space indentation and a trailing newline only when its
 parsed value changes, so a rewrite can reformat the file. A no-op leaves the file, its mtime and
 `managed.json` untouched. Invalid JSON, a non-object root, a symlink or a non-regular file is
 refused, and so is a pointer through a non-object (a type-clash conflict). Duplicate keys in
 `settings.json` collapse to the last value on rewrite.
+
+Every write is bounded like every read: a plan whose `settings.json`, `managed.json` or journal
+would exceed 8 MiB fails before anything is backed up or written. Adopted values are stored twice
+in `managed.json` and the journal holds old and new records, so this limit can be reached first.
 
 ## Ownership file
 
@@ -90,13 +105,23 @@ and the digest of `managed.json` still match the plan. It then makes these chang
 2. It records a pending journal in `managed.json`, holding the digests before and after.
 3. It publishes `settings.json` from a temporary file in the same directory. A new file uses a
    no-replace rename with mode 0600. An existing file is replaced by an atomic exchange that keeps
-   its mode. If the displaced file is not the one that was planned, it is put back and apply fails.
+   its mode. If the displaced item is not the planned file, or cannot be read as one, it is put
+   back and apply fails.
 4. It publishes the settled records to `managed.json`.
 
-If step 4 fails, `settings.json` is rolled back, but only while it still holds exactly what
-Agenvil wrote. Otherwise it is left alone. If a run is interrupted, the next plan settles the
-journal from whichever side `settings.json` matches. If it matches neither side, planning fails
-rather than guess.
+Concurrent writers are handled best effort, since pathname races cannot be fully excluded, but
+Agenvil only ever deletes content whose digest it wrote. When putting a displaced generation back
+would swap away an even newer save, or the swap fails, the displaced one is kept as
+`.tmp-agenvil-settings-*` beside `settings.json`, and the error names it.
+
+If publishing fails before the new content is visible, the earlier steps are undone. Once
+`settings.json` is visible, a later failure (for example a failed directory sync) keeps the journal
+so the next plan settles it; once `managed.json` is committed, `settings.json` is never rolled
+back. If step 4 fails before the commit, `settings.json` is rolled back, but only while it still
+holds exactly what Agenvil wrote. A file Agenvil created is first renamed aside and deleted only if
+it is still Agenvil's write, otherwise it is renamed back, or kept aside and named in the error.
+If a run is interrupted, the next plan settles the journal from whichever side `settings.json`
+matches. If it matches neither side, planning fails rather than guess.
 
 The library's `restore(locations, backup_name)` puts a named backup back, but only while
 `settings.json` is still Agenvil's last write. The current content is backed up first.
@@ -114,5 +139,3 @@ read-only; apply fails closed.
 - `restore` leaves `managed.json` as is, so the next install reports the restored file as a user edit.
 - Unmanaged numbers beyond 64-bit range or in exponent form are re-encoded when the file is
   rewritten (serde_json without `arbitrary_precision`).
-- A managed hook group that gained extra hooks is not recognized as modified, so a reinstall appends
-  the managed group again.

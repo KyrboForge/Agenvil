@@ -49,10 +49,22 @@ pub(super) fn merge(
     }
     for hook in &desired.hooks {
         let record = hooks.iter().find(|record| record.id == hook.id);
-        set_hook(&mut out, hook, record);
+        set_hook(&mut out, hook, record, hooks, desired);
     }
+    // A kept or desired value owns everything at or below it, empty objects included.
+    let kept: Vec<_> = desired
+        .values
+        .iter()
+        .map(|(pointer, _)| pointer)
+        .chain(out.values.iter().map(|record| &record.pointer))
+        .filter_map(|pointer| tokens(pointer))
+        .collect();
     // Deepest first, so a parent empties once its Agenvil-created children are gone.
-    let mut prune: Vec<_> = prune.into_iter().filter_map(|p| tokens(&p)).collect();
+    let mut prune: Vec<_> = prune
+        .into_iter()
+        .filter_map(|p| tokens(&p))
+        .filter(|parts| !kept.iter().any(|value| parts.starts_with(value)))
+        .collect();
     prune.sort_by_key(|parts| std::cmp::Reverse(parts.len()));
     for parts in prune {
         if let Ok(Some(Value::Object(map))) = lookup(&out.document, &parts)
@@ -110,6 +122,11 @@ fn set_value(out: &mut Outcome, target: &str, desired: &Value, record: Option<&V
         Ok(current) => current.cloned(),
     };
     match current {
+        // A recorded key the user deleted is drift, not something to silently re-create.
+        None if record.is_some() => {
+            value(Conflict, Ownership::Mismatch, Reason::UserRemoved, out);
+            out.values.extend(record.cloned());
+        }
         None => {
             let created = insert(&mut out.document, &parts, desired.clone());
             value(Add, Ownership::Absent, Reason::Missing, out);
@@ -193,7 +210,13 @@ fn remove_value(out: &mut Outcome, record: &ValueRecord, prune: &mut BTreeSet<St
     }
 }
 
-fn set_hook(out: &mut Outcome, hook: &Hook, record: Option<&HookRecord>) {
+fn set_hook(
+    out: &mut Outcome,
+    hook: &Hook,
+    record: Option<&HookRecord>,
+    records: &[HookRecord],
+    desired: &Fragment,
+) {
     use OperationKind::{Add, Change, Conflict, Noop};
     let report = |op, owner, why, out: &mut Outcome| {
         self::op(
@@ -217,29 +240,55 @@ fn set_hook(out: &mut Outcome, hook: &Hook, record: Option<&HookRecord>) {
             out.hooks.push(record.clone());
             return;
         };
-        if let Some(index) = old.iter().position(|group| *group == record.group) {
-            if record.event == hook.event && record.group == hook.group {
-                report(Noop, Ownership::Managed, Reason::Current, out);
-                out.hooks.push(record.clone());
-                return;
-            }
-            let mut created = record.created.clone();
-            if record.event == hook.event {
-                array(&mut out.document, &hook.event, &mut created)[index] = hook.group.clone();
+        let Some(index) = old.iter().position(|group| *group == record.group) else {
+            // Any recorded group that is not exactly there is user drift: edited or removed.
+            let why = if old.iter().any(|group| overlaps(group, &record.group)) {
+                Reason::HookModified
             } else {
-                array(&mut out.document, &record.event, &mut created).remove(index);
-                array(&mut out.document, &hook.event, &mut created).push(hook.group.clone());
-            }
-            report(Change, Ownership::Managed, Reason::Changed, out);
-            out.hooks
-                .push(hook_record(&hook.id, &hook.event, &hook.group, created));
+                Reason::UserRemoved
+            };
+            report(Conflict, Ownership::Mismatch, why, out);
+            out.hooks.push(record.clone());
             return;
-        }
-        if old.iter().any(|group| same_commands(group, &record.group)) {
-            report(Conflict, Ownership::Mismatch, Reason::HookModified, out);
+        };
+        if record.event == hook.event && record.group == hook.group {
+            report(Noop, Ownership::Managed, Reason::Current, out);
             out.hooks.push(record.clone());
             return;
         }
+        // Groups that other records own may change in this plan, so only unmanaged groups and
+        // the other desired groups can collide with the new one.
+        let unmanaged = |group: &Value| {
+            !records
+                .iter()
+                .any(|other| other.event == hook.event && other.group == *group)
+        };
+        let moved = record.event != hook.event;
+        let collides = current.iter().enumerate().any(|(slot, group)| {
+            (moved || slot != index)
+                && unmanaged(group)
+                && (*group == hook.group || same_commands(group, &hook.group))
+        }) || desired.hooks.iter().any(|other| {
+            other.id != hook.id
+                && other.event == hook.event
+                && same_commands(&other.group, &hook.group)
+        });
+        if collides {
+            report(Conflict, Ownership::Managed, Reason::HookDuplicate, out);
+            out.hooks.push(record.clone());
+            return;
+        }
+        let mut created = record.created.clone();
+        if record.event == hook.event {
+            array(&mut out.document, &hook.event, &mut created)[index] = hook.group.clone();
+        } else {
+            array(&mut out.document, &record.event, &mut created).remove(index);
+            array(&mut out.document, &hook.event, &mut created).push(hook.group.clone());
+        }
+        report(Change, Ownership::Managed, Reason::Changed, out);
+        out.hooks
+            .push(hook_record(&hook.id, &hook.event, &hook.group, created));
+        return;
     }
     if current
         .iter()
@@ -267,9 +316,16 @@ fn remove_hook(out: &mut Outcome, record: &HookRecord, prune: &mut BTreeSet<Stri
             why,
         );
     };
-    let current = groups(&out.document, &record.event)
-        .map(<[Value]>::to_vec)
-        .unwrap_or_default();
+    let Ok(current) = groups(&out.document, &record.event).map(<[Value]>::to_vec) else {
+        report(
+            OperationKind::Conflict,
+            Ownership::Mismatch,
+            Reason::TypeClash,
+            out,
+        );
+        out.hooks.push(record.clone());
+        return;
+    };
     if let Some(index) = current.iter().position(|group| *group == record.group) {
         array(&mut out.document, &record.event, &mut Vec::new()).remove(index);
         prune.extend(record.created.iter().cloned());
@@ -279,10 +335,7 @@ fn remove_hook(out: &mut Outcome, record: &HookRecord, prune: &mut BTreeSet<Stri
             Reason::Obsolete,
             out,
         );
-    } else if current
-        .iter()
-        .any(|group| same_commands(group, &record.group))
-    {
+    } else if current.iter().any(|group| overlaps(group, &record.group)) {
         report(
             OperationKind::Conflict,
             Ownership::Mismatch,
@@ -298,6 +351,11 @@ fn remove_hook(out: &mut Outcome, record: &HookRecord, prune: &mut BTreeSet<Stri
 fn same_commands(left: &Value, right: &Value) -> bool {
     let left = commands(left);
     !left.is_empty() && left == commands(right)
+}
+
+/// The group runs at least one command of `recorded`: an edited copy of it.
+fn overlaps(group: &Value, recorded: &Value) -> bool {
+    !commands(group).is_disjoint(&commands(recorded))
 }
 
 fn lookup<'a>(document: &'a Value, parts: &[String]) -> Result<Option<&'a Value>, Clash> {

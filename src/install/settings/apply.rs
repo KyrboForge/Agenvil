@@ -35,7 +35,7 @@ pub enum ApplyError {
         step: Step,
         #[source]
         source: io::Error,
-        outcome: &'static str,
+        outcome: String,
     },
 }
 
@@ -98,7 +98,25 @@ pub(super) mod native {
 
     const UNCHANGED: &str = "settings.json is unchanged";
     const JOURNALED: &str = "settings.json is unchanged; the next plan settles managed.json";
+    const WRITTEN: &str = "settings.json has the new content but was not fully synced; the next plan settles managed.json";
+    const COMMITTED: &str = "settings.json and managed.json were written but not fully synced";
 
+    /// A failed publication, and whether the new generation became visible before it failed.
+    struct PublishError {
+        visible: bool,
+        source: io::Error,
+    }
+
+    impl From<io::Error> for PublishError {
+        fn from(source: io::Error) -> Self {
+            Self {
+                visible: false,
+                source,
+            }
+        }
+    }
+
+    /// `inject` runs at each step before its publication and again once it is visible.
     pub(in crate::install::settings) fn apply_with(
         plan: &Plan,
         inject: &mut dyn FnMut(Step) -> io::Result<()>,
@@ -106,12 +124,18 @@ pub(super) mod native {
         if plan.settings_after.is_none() && plan.state_after.is_none() {
             return Ok(None);
         }
-        let fail = |step, outcome| {
+        let fail = |step, outcome: &str| {
+            let outcome = outcome.to_owned();
             move |source| ApplyError::Failed {
                 step,
                 source,
                 outcome,
             }
+        };
+        let failed = |step, source, outcome: &str| ApplyError::Failed {
+            step,
+            source,
+            outcome: outcome.to_owned(),
         };
         let mut quiet = |_| Ok(());
         let mut fs = Fs(&mut quiet);
@@ -129,17 +153,19 @@ pub(super) mod native {
         let Some(after) = &plan.settings_after else {
             // Only the records changed, so there is nothing to journal.
             let bytes = plan.state_after.as_deref().expect("checked above");
-            inject(Step::Commit)
-                .and_then(|()| {
-                    publish(
-                        &state,
-                        state::FILE,
-                        plan.state_digest.as_deref(),
-                        bytes,
-                        0o600,
-                    )
-                })
-                .map_err(fail(Step::Commit, UNCHANGED))?;
+            let at = Step::Commit;
+            publish(
+                &state,
+                state::FILE,
+                plan.state_digest.as_deref(),
+                bytes,
+                0o600,
+                &mut || inject(at),
+            )
+            .map_err(|err| {
+                let outcome = if err.visible { COMMITTED } else { UNCHANGED };
+                failed(at, err.source, outcome)
+            })?;
             return Ok(None);
         };
         let backup = match &plan.settings {
@@ -153,11 +179,19 @@ pub(super) mod native {
         };
         let mut state_digest = plan.state_digest.clone();
         if let Some(journal) = &plan.journal {
-            inject(Step::Journal)
-                .and_then(|()| {
-                    publish(&state, state::FILE, state_digest.as_deref(), journal, 0o600)
-                })
-                .map_err(fail(Step::Journal, UNCHANGED))?;
+            let at = Step::Journal;
+            publish(
+                &state,
+                state::FILE,
+                state_digest.as_deref(),
+                journal,
+                0o600,
+                &mut || inject(at),
+            )
+            .map_err(|err| {
+                let outcome = if err.visible { JOURNALED } else { UNCHANGED };
+                failed(at, err.source, outcome)
+            })?;
             state_digest = Some(manifest::sha256(journal));
         }
         let before = plan
@@ -171,65 +205,77 @@ pub(super) mod native {
                 .path(&plan.paths.claude)
                 .map_err(fail(Step::Settings, JOURNALED))?,
         };
-        let published = inject(Step::Settings).and_then(|()| {
-            publish(
-                &claude,
-                SETTINGS,
-                before.map(|(_, digest)| digest),
-                after,
-                mode,
-            )
-        });
-        if let Err(source) = published {
-            // The journal never took effect; put the previous records back so they stay valid.
-            let journal = state_digest.as_deref();
-            let undone = match &plan.state_before {
-                Some(old) => publish(&state, state::FILE, journal, old, 0o600),
-                None => state
-                    .remove(state::FILE, |file| {
-                        Ok(Some(digest(file)?) == journal.map(str::to_owned))
-                    })
-                    .map(|_| ()),
-            };
-            let outcome = if plan.journal.is_none() || undone.is_ok() {
-                UNCHANGED
-            } else {
-                JOURNALED
-            };
-            return Err(ApplyError::Failed {
-                step: Step::Settings,
-                source,
-                outcome,
-            });
+        let published = publish(
+            &claude,
+            SETTINGS,
+            before.map(|(_, digest)| digest),
+            after,
+            mode,
+            &mut || inject(Step::Settings),
+        );
+        match published {
+            // The new settings are visible: the journal stays so the next plan settles from it.
+            Err(err) if err.visible => return Err(failed(Step::Settings, err.source, WRITTEN)),
+            Err(err) => {
+                // The journal never took effect; put the previous records back so they stay valid.
+                let journal = state_digest.as_deref();
+                let undone = match &plan.state_before {
+                    Some(old) => publish(&state, state::FILE, journal, old, 0o600, &mut || Ok(()))
+                        .or_else(|err| if err.visible { Ok(()) } else { Err(err.source) }),
+                    None => state
+                        .remove(state::FILE, |file| {
+                            Ok(Some(digest(file)?) == journal.map(str::to_owned))
+                        })
+                        .map(|_| ()),
+                };
+                let outcome = if plan.journal.is_none() || undone.is_ok() {
+                    UNCHANGED
+                } else {
+                    JOURNALED
+                };
+                return Err(failed(Step::Settings, err.source, outcome));
+            }
+            Ok(()) => {}
         }
 
         if let Some(bytes) = &plan.state_after {
-            let committed = inject(Step::Commit)
-                .and_then(|()| publish(&state, state::FILE, state_digest.as_deref(), bytes, 0o600));
-            if let Err(source) = committed {
-                let written = manifest::sha256(after);
-                // Undo only our own write; a newer user edit is never replaced.
-                let rollback = match before {
-                    Some((old, _)) => publish(&claude, SETTINGS, Some(&written), old, mode),
-                    None => claude
-                        .remove(SETTINGS, |file| Ok(digest(file)? == written))
-                        .and_then(|removed| {
-                            removed
-                                .then_some(())
-                                .ok_or_else(|| io::Error::other("settings.json changed"))
-                        }),
-                };
-                let outcome = match rollback {
-                    Ok(()) => "settings.json was rolled back; the next plan settles managed.json",
-                    Err(_) => {
-                        "settings.json keeps the new content; the next plan settles managed.json"
-                    }
-                };
-                return Err(ApplyError::Failed {
-                    step: Step::Commit,
-                    source,
-                    outcome,
-                });
+            let committed = publish(
+                &state,
+                state::FILE,
+                state_digest.as_deref(),
+                bytes,
+                0o600,
+                &mut || inject(Step::Commit),
+            );
+            match committed {
+                // The records are settled, so settings.json must not be rolled back under them.
+                Err(err) if err.visible => return Err(failed(Step::Commit, err.source, COMMITTED)),
+                Err(err) => {
+                    let written = manifest::sha256(after);
+                    // Undo only our own write; a newer user edit is never replaced.
+                    let rollback = match before {
+                        Some((old, _)) => {
+                            publish(&claude, SETTINGS, Some(&written), old, mode, &mut || Ok(()))
+                                .or_else(|err| if err.visible { Ok(()) } else { Err(err.source) })
+                        }
+                        None => unpublish(&claude, SETTINGS, &written),
+                    };
+                    let outcome = match rollback {
+                        Ok(()) => {
+                            "settings.json was rolled back; the next plan settles managed.json"
+                                .to_owned()
+                        }
+                        Err(why) => format!(
+                            "settings.json was not rolled back ({why}); the next plan settles managed.json"
+                        ),
+                    };
+                    return Err(ApplyError::Failed {
+                        step: Step::Commit,
+                        source: err.source,
+                        outcome,
+                    });
+                }
+                Ok(()) => {}
             }
         }
         Ok(backup)
@@ -311,44 +357,97 @@ pub(super) mod native {
         Ok(manifest::sha256(&bytes))
     }
 
+    fn named(dir: &Root, name: &str) -> io::Result<Option<String>> {
+        Ok(read(Some(dir), name)?.map(|(bytes, _)| manifest::sha256(&bytes)))
+    }
+
     /// Publishes `bytes` as `name` atomically: no-replace when it is new, an exchange otherwise.
-    /// A displaced generation that is not `expected` belongs to a concurrent writer and is put back.
+    /// A displaced generation that is not `expected` belongs to a concurrent writer: it is put
+    /// back, or kept beside `name`, but never deleted. `inject` is a fault point before the
+    /// publication and once it is visible.
     fn publish(
         dir: &Root,
         name: &str,
         expected: Option<&str>,
         bytes: &[u8],
         mode: u32,
-    ) -> io::Result<()> {
-        let named = |name: &str| -> io::Result<Option<String>> {
-            Ok(read(Some(dir), name)?.map(|(bytes, _)| manifest::sha256(&bytes)))
-        };
-        if named(name)?.as_deref() != expected {
-            return Err(io::Error::other(format!(
-                "{name} changed before publication"
-            )));
+        inject: &mut dyn FnMut() -> io::Result<()>,
+    ) -> Result<(), PublishError> {
+        if named(dir, name)?.as_deref() != expected {
+            return Err(io::Error::other(format!("{name} changed before publication")).into());
         }
         let temp = temp_name("settings");
         write_file(dir, &temp, bytes, mode)?;
-        let published = match expected {
+        let published = inject().and_then(|()| match expected {
             None => rename_new(dir, &temp, name),
             Some(_) => rename_with(dir, &temp, name, RenameFlags::EXCHANGE),
-        };
+        });
         if let Err(err) = published {
             dir.remove(&temp, |_| Ok(true))?;
-            return Err(err);
+            return Err(err.into());
         }
+        let visible = |source| PublishError {
+            visible: true,
+            source,
+        };
+        // Reported only after the displaced generation is checked, like a failed sync.
+        let injected = inject();
         if let Some(expected) = expected {
-            if named(&temp)?.as_deref() != Some(expected) {
-                rename_with(dir, &temp, name, RenameFlags::EXCHANGE)?;
-                dir.remove(&temp, |file| Ok(digest(file)? == manifest::sha256(bytes)))?;
-                return Err(io::Error::other(format!(
-                    "{name} changed during publication; the concurrent content was put back"
-                )));
+            // Anything unreadable, a symlink or a special file fails the check too.
+            if named(dir, &temp).ok().flatten().as_deref() != Some(expected) {
+                return Err(recover(dir, name, &temp, &manifest::sha256(bytes)));
             }
-            dir.remove(&temp, |file| Ok(digest(file)? == expected))?;
+            dir.remove(&temp, |file| Ok(digest(file)? == expected))
+                .map_err(visible)?;
         }
-        rustix::fs::fsync(dir)?;
+        injected.map_err(visible)?;
+        rustix::fs::fsync(dir).map_err(|err| visible(err.into()))?;
         Ok(())
+    }
+
+    /// Undoes an exchange that displaced a concurrent generation now held at `temp`. Best effort:
+    /// pathname races remain, but only `ours` is ever deleted.
+    fn recover(dir: &Root, name: &str, temp: &str, ours: &str) -> PublishError {
+        let error = |visible, detail: String| PublishError {
+            visible,
+            source: io::Error::other(format!("{name} changed during publication; {detail}")),
+        };
+        let kept = format!("the displaced content was kept as {temp} beside {name}");
+        // A newer writer already replaced ours, so swapping back would hide that generation.
+        if named(dir, name).ok().flatten().as_deref() != Some(ours) {
+            return error(false, kept);
+        }
+        if let Err(err) = rename_with(dir, temp, name, RenameFlags::EXCHANGE) {
+            return error(true, format!("{kept} ({err})"));
+        }
+        // `temp` holds ours unless yet another writer got in between; that one is kept.
+        match dir.remove(temp, |file| Ok(digest(file)? == ours)) {
+            Ok(true) => error(false, "the concurrent content was put back".to_owned()),
+            _ => error(
+                false,
+                format!("the concurrent content was put back and {temp} beside it was kept"),
+            ),
+        }
+    }
+
+    /// Removes a `settings.json` Agenvil created without unlinking the live name: it is first
+    /// renamed aside, deleted only if it is still `written`, and put back otherwise.
+    fn unpublish(dir: &Root, name: &str, written: &str) -> io::Result<()> {
+        let aside = temp_name("settings");
+        rename_new(dir, name, &aside)?;
+        if matches!(
+            dir.remove(&aside, |file| Ok(digest(file)? == written)),
+            Ok(true)
+        ) {
+            return rustix::fs::fsync(dir).map_err(Into::into);
+        }
+        match rename_new(dir, &aside, name) {
+            Ok(()) => Err(io::Error::other(format!(
+                "{name} changed; it was left in place"
+            ))),
+            Err(err) => Err(io::Error::other(format!(
+                "{name} changed and could not be put back ({err}); it was kept as {aside} beside it"
+            ))),
+        }
     }
 }

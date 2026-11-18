@@ -69,6 +69,35 @@ impl Home {
     fn state(&self) -> Option<Vec<u8>> {
         fs::read(self.locations.local_root.join("state").join(state::FILE)).ok()
     }
+
+    /// Generations Agenvil set aside beside `settings.json`, with their content.
+    fn kept(&self) -> Vec<Vec<u8>> {
+        fs::read_dir(&self.locations.claude_root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(".tmp-agenvil")
+            })
+            .map(|path| fs::read(path).unwrap())
+            .collect()
+    }
+}
+
+/// Fails the `nth` (1-based) fault point of `at`: 1 is before publication, 2 once visible.
+fn fail_at(at: Step, nth: usize) -> impl FnMut(Step) -> std::io::Result<()> {
+    let mut seen = 0;
+    move |step| {
+        if step == at {
+            seen += 1;
+            if seen == nth {
+                return Err(std::io::Error::other("injected"));
+            }
+        }
+        Ok(())
+    }
 }
 
 fn fragment(value: Value) -> Fragment {
@@ -444,10 +473,7 @@ fn settings_matching_neither_side_of_a_journal_are_refused() {
         Ok(())
     })
     .unwrap_err();
-    assert!(
-        error.to_string().contains("keeps the new content"),
-        "{error}"
-    );
+    assert!(error.to_string().contains("not rolled back"), "{error}");
     assert_eq!(home.bytes(), br#"{"edited": true}"#);
     assert!(matches!(
         super::plan(&home.locations, None),
@@ -460,8 +486,10 @@ fn a_reinstall_that_reproduces_the_bytes_still_settles_its_journal() {
     let home = Home::new();
     let one = fragment(json!({"schema": 1, "values": {"/k": 1}}));
     home.install(&one);
-    home.write("{}");
+    let first = home.bytes();
+    apply(&home.plan(None)).unwrap();
     home.install(&one);
+    assert_eq!(home.bytes(), first);
     // Later edits must not look like an interrupted apply.
     home.write(r#"{"k": 1, "x": 2}"#);
     assert!(plan(&home.locations, None).is_ok());
@@ -604,4 +632,257 @@ fn json_plans_name_operations_files_and_summary() {
     assert_eq!(value["operations"][2]["event"], "PreToolUse");
     assert_eq!(value["files"]["settings"]["action"], "create");
     assert_eq!(value["summary"]["add"], 4);
+}
+
+#[test]
+fn a_recorded_value_the_user_deleted_is_a_conflict_until_removed() {
+    let home = Home::new();
+    home.install(&basic());
+    let mut doc = home.json();
+    doc.as_object_mut().unwrap().shift_remove("model");
+    home.write(&doc.to_string());
+    let plan = home.plan(Some(&basic()));
+    assert_eq!(
+        ops(&plan)[0],
+        (OperationKind::Conflict, "/model", Reason::UserRemoved)
+    );
+    assert_eq!(plan.operations[0].ownership, Ownership::Mismatch);
+    assert_eq!(plan.files.state.action, FileAction::Unchanged);
+    // Re-adopting: `--remove` drops the stale record, then a reinstall adds the key again.
+    apply(&home.plan(None)).unwrap();
+    let plan = home.install(&basic());
+    assert_eq!(
+        ops(&plan)[0],
+        (OperationKind::Add, "/model", Reason::Missing)
+    );
+    assert_eq!(home.json()["model"], "opus");
+}
+
+#[test]
+fn managed_hook_groups_that_drifted_are_conflicts() {
+    let home = Home::new();
+    home.install(&basic());
+    let mut doc = home.json();
+    doc["hooks"]["PreToolUse"][0]["hooks"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"type": "command", "command": "extra.sh"}));
+    doc["hooks"].as_object_mut().unwrap().shift_remove("Stop");
+    home.write(&doc.to_string());
+    let before = home.bytes();
+    let install = home.plan(Some(&basic()));
+    assert_eq!(
+        ops(&install)[2..],
+        [
+            (OperationKind::Conflict, "guard", Reason::HookModified),
+            (OperationKind::Conflict, "done", Reason::UserRemoved),
+        ]
+    );
+    let removal = home.plan(None);
+    assert_eq!(
+        ops(&removal)[2..],
+        [
+            (OperationKind::Conflict, "guard", Reason::HookModified),
+            (OperationKind::Remove, "done", Reason::Gone),
+        ]
+    );
+    assert_eq!(home.bytes(), before);
+
+    // Once the user's copy is gone too, `--remove` then a reinstall re-adds both groups.
+    doc["hooks"]
+        .as_object_mut()
+        .unwrap()
+        .shift_remove("PreToolUse");
+    home.write(&doc.to_string());
+    apply(&home.plan(None)).unwrap();
+    home.install(&basic());
+    assert_eq!(
+        home.json()["hooks"]["PreToolUse"],
+        json!([group("guard.sh")])
+    );
+    assert_eq!(home.json()["hooks"]["Stop"], json!([group("done.sh")]));
+}
+
+#[test]
+fn a_managed_hook_event_replaced_by_a_non_array_keeps_its_record() {
+    let home = Home::new();
+    home.install(&basic());
+    let mut doc = home.json();
+    doc["hooks"]["Stop"] = json!("off");
+    home.write(&doc.to_string());
+    for desired in [Some(&basic()), None] {
+        let plan = home.plan(desired);
+        assert_eq!(
+            ops(&plan)[3],
+            (OperationKind::Conflict, "done", Reason::TypeClash)
+        );
+        assert!(matches!(
+            apply(&plan),
+            Err(ApplyError::Conflicts { count: 1 })
+        ));
+    }
+}
+
+#[test]
+fn hook_updates_and_moves_onto_an_unmanaged_command_conflict() {
+    let home = Home::new();
+    home.install(&basic());
+    let mut doc = home.json();
+    doc["hooks"]["PreToolUse"]
+        .as_array_mut()
+        .unwrap()
+        .push(group("mine.sh"));
+    doc["hooks"]["PostToolUse"] = json!([group("mine.sh")]);
+    home.write(&doc.to_string());
+    let before = home.bytes();
+    for event in ["PreToolUse", "PostToolUse"] {
+        let next = fragment(json!({"schema": 1, "hooks": [hook("guard", event, "mine.sh")]}));
+        let plan = home.plan(Some(&next));
+        assert!(
+            ops(&plan).contains(&(OperationKind::Conflict, "guard", Reason::HookDuplicate)),
+            "{event}"
+        );
+        assert!(matches!(apply(&plan), Err(ApplyError::Conflicts { .. })));
+    }
+    assert_eq!(home.bytes(), before);
+
+    // Two managed groups swapping commands do not collide with each other.
+    let home = Home::new();
+    let pair = |a: &str, b: &str| {
+        fragment(json!({"schema": 1, "hooks": [hook("x", "Stop", a), hook("y", "Stop", b)]}))
+    };
+    home.install(&pair("a.sh", "b.sh"));
+    let plan = home.install(&pair("b.sh", "a.sh"));
+    assert_eq!(plan.summary.change, 2);
+    let stop = home.json()["hooks"]["Stop"].clone();
+    assert_eq!(stop.as_array().unwrap().len(), 2);
+    assert_eq!(home.plan(Some(&pair("b.sh", "a.sh"))).summary.noop, 2);
+}
+
+#[test]
+fn a_value_replaced_by_its_parent_object_is_not_pruned() {
+    let home = Home::new();
+    home.write("{}");
+    home.install(&fragment(json!({"schema": 1, "values": {"/a/b/c": 1}})));
+    home.install(&fragment(json!({"schema": 1, "values": {"/a": {"b": {}}}})));
+    assert_eq!(home.json(), json!({"a": {"b": {}}}));
+    let plan = home.plan(Some(&fragment(
+        json!({"schema": 1, "values": {"/a": {"b": {}}}}),
+    )));
+    assert_eq!(ops(&plan), [(OperationKind::Noop, "/a", Reason::Current)]);
+}
+
+#[test]
+fn results_beyond_the_read_limit_are_refused_before_writing() {
+    let big = "x".repeat(MAX_BYTES as usize / 2 + 1);
+    // An adopted value is stored twice in managed.json.
+    let home = Home::new();
+    home.write(&json!({"big": big}).to_string());
+    let adopt = fragment(json!({"schema": 1, "values": {"/big": big}}));
+    let error = plan(&home.locations, Some(&adopt)).unwrap_err();
+    assert!(error.to_string().contains("8 MiB"), "{error}");
+    // Two halves fit the fragment and the file, but not their merge.
+    let other = fragment(json!({"schema": 1, "values": {"/more": big}}));
+    let error = plan(&home.locations, Some(&other)).unwrap_err();
+    assert!(error.to_string().contains("settings.json"), "{error}");
+    assert!(home.state().is_none());
+    assert!(home.backups().is_empty());
+}
+
+#[test]
+fn rolling_back_a_created_file_never_deletes_a_concurrent_save() {
+    let home = Home::new();
+    let plan = home.plan(Some(&basic()));
+    let settings = home.settings();
+    apply_with(&plan, &mut |step| {
+        if step == Step::Commit {
+            fs::write(&settings, r#"{"claude": true}"#)?;
+            return Err(std::io::Error::other("injected"));
+        }
+        Ok(())
+    })
+    .unwrap_err();
+    assert_eq!(home.bytes(), br#"{"claude": true}"#);
+    assert!(home.kept().is_empty());
+}
+
+#[test]
+fn a_concurrent_replacement_during_publication_is_put_back() {
+    let home = Home::new();
+    home.write("{}");
+    let records = home.state();
+    let plan = home.plan(Some(&basic()));
+    let settings = home.settings();
+    let real = home.dir.path().join("real.json");
+    fs::write(&real, "{}").unwrap();
+    // A symlink appears between the check and the exchange.
+    let mut first = true;
+    let error = apply_with(&plan, &mut |step| {
+        if step == Step::Settings && std::mem::take(&mut first) {
+            fs::remove_file(&settings)?;
+            std::os::unix::fs::symlink(&real, &settings)?;
+        }
+        Ok(())
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("put back"), "{error}");
+    assert!(fs::symlink_metadata(&settings).unwrap().is_symlink());
+    assert_eq!(fs::read(&real).unwrap(), b"{}");
+    assert!(home.kept().is_empty());
+    assert_eq!(home.state(), records);
+}
+
+#[test]
+fn a_newer_generation_is_never_swapped_away_during_recovery() {
+    let home = Home::new();
+    home.write("{}");
+    let plan = home.plan(Some(&basic()));
+    let settings = home.settings();
+    let newer = home.locations.claude_root.join("newer");
+    let mut calls = 0;
+    let error = apply_with(&plan, &mut |step| {
+        if step == Step::Settings {
+            calls += 1;
+            if calls == 1 {
+                fs::write(&settings, "1")?;
+            } else {
+                fs::write(&newer, "2")?;
+                fs::rename(&newer, &settings)?;
+            }
+        }
+        Ok(())
+    })
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("was kept as .tmp-agenvil"),
+        "{error}"
+    );
+    assert_eq!(home.bytes(), b"2");
+    assert_eq!(home.kept(), [b"1".to_vec()]);
+}
+
+#[test]
+fn failures_after_a_visible_write_keep_what_was_published() {
+    // settings.json is visible: the journal stays, and the next plan settles from it.
+    let home = Home::new();
+    home.write("{}");
+    let plan = home.plan(Some(&basic()));
+    let error = apply_with(&plan, &mut fail_at(Step::Settings, 2)).unwrap_err();
+    assert!(error.to_string().contains("not fully synced"), "{error}");
+    assert_eq!(home.json()["model"], "opus");
+    let next = home.plan(Some(&basic()));
+    assert_eq!(next.summary.noop, 4);
+    assert_eq!(next.files.state.action, FileAction::Modify);
+    apply(&next).unwrap();
+
+    // managed.json is committed: settings.json is not rolled back under it.
+    let home = Home::new();
+    home.write("{}");
+    let plan = home.plan(Some(&basic()));
+    let error = apply_with(&plan, &mut fail_at(Step::Commit, 2)).unwrap_err();
+    assert!(error.to_string().contains("not fully synced"), "{error}");
+    assert_eq!(home.json()["model"], "opus");
+    let next = home.plan(Some(&basic()));
+    assert_eq!(next.summary.noop, 4);
+    assert_eq!(next.files.state.action, FileAction::Unchanged);
 }

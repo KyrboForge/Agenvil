@@ -27,7 +27,7 @@ use crate::stage::{PathKind, pinned::Root};
 use state::{Pending, State, User};
 
 pub(super) const SETTINGS: &str = "settings.json";
-/// Bounds every read: the fragment, `settings.json` and `managed.json`.
+/// Bounds every read (the fragment, `settings.json` and `managed.json`) and so every write.
 const MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
@@ -87,6 +87,8 @@ pub enum Reason {
     UserValue,
     /// The user edited a value Agenvil wrote.
     UserEdited,
+    /// The user deleted a value or hook group Agenvil recorded; `--remove` drops the record.
+    UserRemoved,
     /// A parent on the path is not an object, or a hook event is not an array.
     TypeClash,
     /// A managed hook group whose commands are still there was edited.
@@ -307,6 +309,20 @@ pub fn plan(locations: &Locations, desired: Option<&Fragment>) -> Result<Plan, E
     let state_after = (after != recorded.user || journal.is_some())
         .then(|| encode(after.as_ref()))
         .transpose()?;
+
+    // What is written must stay readable by the next run.
+    let oversized =
+        |bytes: &Option<Vec<u8>>| bytes.as_ref().is_some_and(|b| b.len() as u64 > MAX_BYTES);
+    let too_large = "the result would exceed the 8 MiB size limit; nothing was changed".to_owned();
+    if oversized(&settings_after) {
+        return Err(unusable(too_large));
+    }
+    if oversized(&state_after) || oversized(&journal) {
+        return Err(Error::Settings {
+            path: state_path,
+            detail: too_large,
+        });
+    }
 
     let action = |before: bool, after: bool| match (before, after) {
         (_, false) => FileAction::Unchanged,
