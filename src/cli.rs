@@ -224,7 +224,17 @@ fn execute(cli: &Cli) -> Result<(), Error> {
             };
             let plan = Plan::new(&config, &options)?;
             let inventory = Inventory::build(root, &config, &Limits::default())?;
-            let outcome = validate::run(root, &config, &inventory, &plan);
+            let mut outcome = validate::run(root, &config, &inventory, &plan);
+            if let Some(source) = &config.paths.instructions {
+                match build::instructions(root, &config, source.as_path(), &build::limits()) {
+                    Ok(_) => {}
+                    Err(Ok(issue)) => return Err(build::Error::Invalid(vec![issue]).into()),
+                    Err(Err(problem)) => {
+                        outcome.problems.push(problem);
+                        outcome.problems.sort();
+                    }
+                }
+            }
             let findings = &outcome.findings;
             match format {
                 CheckFormat::Human => print!("{}", report::human(findings, *quiet)),
@@ -278,11 +288,16 @@ fn execute(cli: &Cli) -> Result<(), Error> {
             }
             let built = build::claude(root, &config, &inventory, &out)?;
             println!(
-                "built {} agent(s), {} skill(s) and {} rule(s) as {} file(s) in {}\n\
+                "built {} agent(s), {} skill(s) and {} rule(s){} as {} file(s) in {}\n\
                  staging only: nothing was installed; copy or link the tree yourself",
                 built.agents,
                 built.skills,
                 built.rules,
+                if built.instructions {
+                    " plus CLAUDE.md"
+                } else {
+                    ""
+                },
                 built.files,
                 built.out.display()
             );

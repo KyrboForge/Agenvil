@@ -122,6 +122,9 @@ pub struct Paths {
     pub agents: RelPath,
     pub skills: RelPath,
     pub rules: RelPath,
+    /// One harness-neutral Markdown file of project-wide instructions. Nothing is built from it
+    /// unless it is set; the Claude target emits it as the project-root `CLAUDE.md`.
+    pub instructions: Option<RelPath>,
     /// Markdown file with the generated model table; PO001 runs only when this is set.
     pub policy: Option<RelPath>,
     /// Team defaults, validated by CF001 only when this is set.
@@ -137,6 +140,7 @@ impl Default for Paths {
             agents: rel("agents"),
             skills: rel("skills"),
             rules: rel("rules"),
+            instructions: None,
             policy: None,
             defaults: None,
             bin: None,
@@ -436,6 +440,42 @@ mod tests {
 
     fn err(text: &str) -> String {
         parse(text).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn project_instructions_are_unset_by_default_and_accept_a_relative_source() {
+        assert!(parse(MINIMAL).unwrap().paths.instructions.is_none());
+        let config = parse(&format!(
+            "{MINIMAL}[paths]\ninstructions = \"project/instructions.md\"\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            config.paths.instructions.unwrap().as_path(),
+            Path::new("project/instructions.md")
+        );
+    }
+
+    #[test]
+    fn instructions_paths_cannot_contain_parent_traversal() {
+        for bad in ["../instructions.md", "project/../instructions.md"] {
+            let message = err(&format!("{MINIMAL}[paths]\ninstructions = {bad:?}\n"));
+            assert!(message.contains("stay inside"), "{bad}: {message}");
+        }
+    }
+
+    #[test]
+    fn instructions_paths_cannot_be_absolute_on_any_platform() {
+        for bad in [
+            "/instructions.md",
+            "C:/instructions.md",
+            "//server/share/instructions.md",
+        ] {
+            let message = err(&format!("{MINIMAL}[paths]\ninstructions = {bad:?}\n"));
+            assert!(
+                message.contains("relative to the project root"),
+                "{bad}: {message}"
+            );
+        }
     }
 
     #[test]

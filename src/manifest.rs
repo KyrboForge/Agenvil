@@ -177,8 +177,8 @@ impl Manifest {
                 add(
                     path,
                     false,
-                    "outside .claude/agents, .claude/rules and .claude/skills, so it can never \
-                     be owned"
+                    "outside CLAUDE.md, .claude/agents, .claude/rules and .claude/skills, so it can \
+                     never be owned"
                         .to_owned(),
                 );
             }
@@ -243,7 +243,14 @@ fn is_sha256(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
+/// The one root-level file a build may own: Claude Code's project instructions.
+pub const INSTRUCTIONS: &str = "CLAUDE.md";
+
 fn in_layout(path: &str) -> bool {
+    path == INSTRUCTIONS || in_dirs(path)
+}
+
+fn in_dirs(path: &str) -> bool {
     let mut parts = path.split('/');
     parts.next() == Some(".claude")
         && parts.next().is_some_and(|d| LAYOUT.contains(&d))
@@ -328,6 +335,47 @@ mod tests {
 
     fn flaws(paths: &[&str]) -> Vec<Flaw> {
         Manifest::new(paths.iter().map(|p| file(p)).collect()).flaws()
+    }
+
+    #[test]
+    fn manifest_accepts_exactly_the_root_claude_md_instruction_entrypoint() {
+        assert!(flaws(&[".claude/agents/a.md", "CLAUDE.md"]).is_empty());
+    }
+
+    #[test]
+    fn manifest_rejects_readme_and_agents_md_as_owned_root_files() {
+        for path in ["README.md", "AGENTS.md"] {
+            let found = flaws(&[path]);
+            assert!(
+                found
+                    .iter()
+                    .any(|f| f.path == path && f.message.contains("can never be owned")),
+                "{path}: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_rejects_claude_md_outside_the_root_or_resource_layout() {
+        for path in ["subdir/CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md"] {
+            let found = flaws(&[path]);
+            assert!(
+                found
+                    .iter()
+                    .any(|f| f.path == path && f.message.contains("can never be owned")),
+                "{path}: {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_rejects_lowercase_claude_md_and_its_case_collision() {
+        assert!(!flaws(&["claude.md"]).is_empty());
+        let found = flaws(&["CLAUDE.md", "claude.md"]);
+        assert!(
+            found.iter().any(|f| f.message.contains("case-insensitive")),
+            "{found:?}"
+        );
     }
 
     #[test]

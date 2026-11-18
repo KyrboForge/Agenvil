@@ -200,15 +200,16 @@ redirect a delete elsewhere. The manifest is rewritten through the same handle.
 ```
 .generated/claude/
 ├── manifest.json
+├── CLAUDE.md              (only when paths.instructions is set)
 └── .claude/
     ├── agents/<name>.md
     ├── skills/<name>/SKILL.md (+ every supporting file)
     └── rules/<name>.md
 ```
 
-These are the locations Claude Code reads. Emitted kinds: agents, skills and rules (`rules/*.md`,
-copied as they are; Claude Code reads only their `paths` frontmatter). **Gap:** `CLAUDE.md` project
-instructions have no source in the Agenvil schema yet, so none is generated and none is invented.
+These are the locations Claude Code reads. Emitted kinds: agents, skills, rules (`rules/*.md`,
+copied as they are; Claude Code reads only their `paths` frontmatter), and optionally
+`CLAUDE.md` project instructions — see [Project instructions](#project-instructions-claudemd) below.
 
 Unknown agent fields (for example `x-team:`) are kept untouched: Claude Code ignores them, so
 there is nothing to drop or warn about. Executable bits of skill scripts are kept on Unix; no other
@@ -239,6 +240,100 @@ mode bit is copied.
 Output is byte-for-byte deterministic: no timestamps, and nothing is injected into the generated
 files. `manifest.json` itself is not listed. `build --check` and `--clean` read this file, but
 only as a claim: see [Drift checks](#drift-checks-build---check).
+
+## Project instructions (`CLAUDE.md`)
+
+Configure a harness-neutral Markdown file of project-wide instructions. When set, the Claude
+target copies it byte for byte to `CLAUDE.md` at the root of the staging tree:
+
+```toml
+[paths]
+instructions = "instructions.md"
+```
+
+The path is relative to the project root. It follows the same rules as other `[paths]` entries
+(no `..`, no `/` prefix, no `\` or `:`). When the key is absent nothing is generated and no
+migration is needed.
+
+The build then produces:
+
+```
+.generated/claude/
+├── manifest.json
+├── CLAUDE.md              ← byte-for-byte copy of instructions.md
+└── .claude/
+    ├── agents/…
+    └── skills/…
+```
+
+Manifest files are sorted bytewise, so `.claude/…` entries come before `CLAUDE.md`:
+
+```json
+{
+  "files": [
+    {
+      "path": ".claude/agents/reviewer.md",
+      "source": "agents/reviewer.md",
+      "sha256": "…",
+      "bytes": 252,
+      "transform": "copy"
+    },
+    {
+      "path": "CLAUDE.md",
+      "source": "instructions.md",
+      "sha256": "…",
+      "bytes": 1024,
+      "transform": "copy"
+    }
+  ]
+}
+```
+
+### Source validation
+
+Both `agenvil check` and `agenvil build` validate the configured source file. It must:
+
+- exist (a configured-but-missing file is an error, never silently skipped or treated as empty)
+- be a regular file, not a directory or special file
+- be valid UTF-8
+- be at most 1 MiB
+- have no symlink in any path component
+- not be inside the agents, skills or rules directories (they are distinct concepts)
+
+The build also requires the source to be outside the output directory.
+
+All failures use the existing source diagnostics. There is no templating,
+interpolation or import resolution: `@path` imports that Claude Code's own tooling follows inside
+the file are **not** followed, rewritten or validated by Agenvil. That content is the author's
+responsibility.
+
+### Drift checks and cleanup
+
+`build --check` treats `CLAUDE.md` like any other generated file:
+
+- **`missing`** — `paths.instructions` is set but `CLAUDE.md` is absent from the staging tree
+- **`changed`** — the file exists but its size or SHA-256 differs from the source
+- **`stale`** — `paths.instructions` was removed from the config; the previously generated file
+  is now stale
+
+`build --clean [--apply]` lists (dry run) or deletes `CLAUDE.md` only if the manifest owns it
+and its digest still matches. A file you modified is kept and reported as `kept`.
+
+### Staging, not installing
+
+**Generating `CLAUDE.md` into the staging tree is not the same as installing it.** Nothing is
+written to the real `CLAUDE.md` of a repository, to `~/.claude/CLAUDE.md`, or to any other live
+location. Copy or link the staging tree where you need it, as with the rest of the output.
+User/global instructions (`~/.claude/CLAUDE.md`) are HOME-state, per-user, and out of scope.
+See [`docs/instructions.md`](instructions.md) for the portability model and future extension points.
+
+### Build output line
+
+When `paths.instructions` is set the summary line reads:
+
+```
+built N agent(s), N skill(s) and N rule(s) plus CLAUDE.md as N file(s) in .generated/claude
+```
 
 ## Ownership and safety
 

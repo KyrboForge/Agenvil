@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "target": "claude",
+  "owner": "agenvil",
+  "generator": {
+    "name": "agenvil",
+    "version": "@VERSION@"
+  },
+  "files": [
+    {
+      "path": ".claude/agents/reviewer.md",
+      "source": "agents/reviewer.md",
+      "sha256": "d80dd1fbcd8e7b9629b6ea8f41322865f178ec50888f95b163dfe2cf1f54300f",
+      "bytes": 85,
+      "transform": "copy"
+    },
+    {
+      "path": ".claude/rules/style.md",
+      "source": "rules/style.md",
+      "sha256": "bf74b8fa103bb8602f4c71d0d353bd270041c0602e0a77dcbad66d43573602e1",
+      "bytes": 31,
+      "transform": "copy"
+    },
+    {
+      "path": ".claude/skills/tdd/SKILL.md",
+      "source": "skills/tdd/SKILL.md",
+      "sha256": "01b308b6373c19242fd3dbc2648f8c53b63c4186954eb4950fea4a008ae3ccd7",
+      "bytes": 97,
+      "transform": "copy"
+    },
+    {
+      "path": "CLAUDE.md",
+      "source": "instructions.md",
+      "sha256": "1336228eab504f8f966740ac8d20c34148ee30d7ca18cd31ab0c044311af9a2b",
+      "bytes": 80,
+      "transform": "copy"
+    }
+  ]
+}

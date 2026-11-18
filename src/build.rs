@@ -1,7 +1,7 @@
 //! Builds the Claude-native staging tree from an [`Inventory`].
 //!
-//! The output is a *staging* tree, never an installation: `<out>/.claude/{agents,skills,rules}`
-//! plus `<out>/manifest.json`. Sources are untrusted data: nothing is executed or fetched, and
+//! The output is a *staging* tree, never an installation: `<out>/.claude/{agents,skills,rules}`,
+//! `<out>/manifest.json` and, only when `paths.instructions` is set, `<out>/CLAUDE.md`. Sources are untrusted data: nothing is executed or fetched, and
 //! symlinks and special files are rejected. The tree is written to a sibling temp directory and
 //! renamed into place only after every file was written, so a failed build leaves no partial output.
 //!
@@ -31,6 +31,8 @@ pub const DEFAULT_OUT: &str = ".generated/claude";
 /// Claude Code preloads at most this many skills into one agent.
 const MAX_PRELOADED_SKILLS: usize = 32;
 const MAX_DEPTH: usize = 16;
+/// Instructions are read into every Claude Code session, so far less than a skill asset is allowed.
+const MAX_INSTRUCTIONS_BYTES: u64 = 1024 * 1024;
 
 /// Scan limits for a build: the inventory defaults, with room for binary skill assets.
 pub fn limits() -> Limits {
@@ -106,6 +108,8 @@ pub struct Summary {
     pub agents: usize,
     pub skills: usize,
     pub rules: usize,
+    /// Whether the project-root `CLAUDE.md` was generated.
+    pub instructions: bool,
     pub files: usize,
 }
 
@@ -127,6 +131,7 @@ pub fn claude(
         agents: inventory.agents.len(),
         skills: inventory.skills.len(),
         rules: inventory.rules.len(),
+        instructions: config.paths.instructions.is_some(),
         files: entries.len(),
     })
 }
@@ -293,6 +298,14 @@ fn plan(root: &Path, config: &Config, inventory: &Inventory) -> Result<Vec<Entry
         });
     }
 
+    if let Some(source) = &config.paths.instructions {
+        match instructions(root, config, source.as_path(), &limits) {
+            Ok(entry) => entries.push(entry),
+            Err(Ok(issue)) => issues.push(issue),
+            Err(Err(problem)) => problems.push(problem),
+        }
+    }
+
     if !problems.is_empty() {
         problems.sort();
         return Err(Error::Incomplete(problems));
@@ -323,6 +336,105 @@ fn plan(root: &Path, config: &Config, inventory: &Inventory) -> Result<Vec<Entry
     }
     entries.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(entries)
+}
+
+/// The project-root `CLAUDE.md`, copied byte for byte from the configured source. Nothing in it is
+/// interpreted: no templating, no `@import` resolution. A missing, unsafe or unreadable source is
+/// a failure, never an empty file. `Err(Ok(_))` is a source-model error, `Err(Err(_))` an input one.
+pub(crate) fn instructions(
+    root: &Path,
+    config: &Config,
+    source: &Path,
+    limits: &Limits,
+) -> Result<Entry, Result<Issue, Problem>> {
+    let parts: Option<Vec<&str>> = source
+        .components()
+        .map(|c| c.as_os_str().to_str())
+        .collect();
+    let shown = parts.map_or_else(
+        || source.to_string_lossy().into_owned(),
+        |parts| parts.join("/"),
+    );
+    let problem = |kind, message: &str| {
+        Err(Err(Problem {
+            path: shown.clone(),
+            line: None,
+            kind,
+            message: message.to_owned(),
+        }))
+    };
+    if source.to_str().is_none() {
+        return problem(ProblemKind::InvalidPath, "the path must be valid UTF-8");
+    }
+    if let Some((_, why)) = manifest::path_flaw(&shown) {
+        return problem(ProblemKind::InvalidPath, &why);
+    }
+    let paths = &config.paths;
+    if [&paths.agents, &paths.skills, &paths.rules]
+        .iter()
+        .any(|dir| source.starts_with(dir.as_path()))
+    {
+        return Err(Ok(Issue {
+            path: shown,
+            message: "`paths.instructions` must not be inside the agents, skills or rules \
+                      directories; those are separate concepts"
+                .to_owned(),
+        }));
+    }
+    // Every component is checked, so a symlinked parent cannot lead outside the project root.
+    let mut path = root.to_path_buf();
+    let mut meta = None;
+    for part in source.components() {
+        path.push(part);
+        match fs::symlink_metadata(&path) {
+            Ok(m) if m.is_symlink() => {
+                return problem(
+                    ProblemKind::Symlink,
+                    "symlinks are never followed or copied",
+                );
+            }
+            Ok(m) => meta = Some(m),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return problem(
+                    ProblemKind::Missing,
+                    "`paths.instructions` is set but the file does not exist",
+                );
+            }
+            Err(_) => return problem(ProblemKind::Unreadable, "could not read file metadata"),
+        }
+    }
+    if !meta.is_some_and(|m| m.is_file()) {
+        return problem(ProblemKind::NotRegularFile, "expected a regular file");
+    }
+    let max = limits.max_file_bytes.min(MAX_INSTRUCTIONS_BYTES);
+    let too_large = || {
+        problem(
+            ProblemKind::TooLarge,
+            &format!("larger than the {max}-byte limit"),
+        )
+    };
+    let bytes = match stage::read_under_root(root, &shown, max + 1) {
+        Ok(bytes) => bytes,
+        Err(kind) => {
+            return problem(
+                kind,
+                "the file changed while it was read; nothing was copied",
+            );
+        }
+    };
+    if bytes.len() as u64 > max {
+        return too_large();
+    }
+    if std::str::from_utf8(&bytes).is_err() {
+        return problem(ProblemKind::InvalidUtf8, "instructions must be UTF-8 text");
+    }
+    Ok(Entry {
+        path: manifest::INSTRUCTIONS.to_owned(),
+        source: shown,
+        bytes,
+        transform: Transform::Copy,
+        exec: false,
+    })
 }
 
 /// Problems with an agent's `skills:` list. Claude Code skips an unknown skill silently, so
@@ -684,6 +796,13 @@ pub fn location(root: &Path, config: &Config, out: &Path) -> Result<bool, Error>
             ));
         }
     }
+    if let Some(source) = &paths.instructions
+        && resolve(&root.join(source.as_path()))?.starts_with(&wanted)
+    {
+        return Err(fail(
+            "the output directory must not contain the instructions source",
+        ));
+    }
     let meta = match fs::symlink_metadata(out) {
         Ok(meta) => meta,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
@@ -827,6 +946,24 @@ fn replace(out: &Path, tmp: &Path, parent: &Path, name: &str, pid: u32) -> Resul
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn missing_instructions_are_classified_as_missing_input_with_portable_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::parse(
+            "schema = 1\n[project]\nname = \"demo\"\n[paths]\ninstructions = \"project/instructions.md\"\n",
+            Path::new("agenvil.toml"),
+        )
+        .unwrap();
+        let source = config.paths.instructions.as_ref().unwrap().as_path();
+        let Err(Err(problem)) = instructions(dir.path(), &config, source, &limits()) else {
+            panic!("missing instructions must be an input problem");
+        };
+        assert_eq!(problem.kind, ProblemKind::Missing);
+        assert_eq!(problem.path, "project/instructions.md");
+        assert!(problem.message.contains("paths.instructions"));
+        assert!(problem.message.contains("file does not exist"));
+    }
 
     #[test]
     fn collisions_ignore_case_and_catch_file_directory_clashes() {

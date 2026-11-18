@@ -7,6 +7,7 @@ name = "my-agents"
 # agents = "agents"
 # skills = "skills"
 # rules = "rules"
+# instructions = "instructions.md" # Portable project instructions; Claude target copies to CLAUDE.md
 # policy = "POLICY.md"          # Enables PO001
 # defaults = "config/defaults.toml" # Enables CF001
 # bin = "bin"                  # Enables HY002
