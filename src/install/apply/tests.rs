@@ -1,5 +1,5 @@
 use std::fs;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{MetadataExt, symlink};
 use std::path::PathBuf;
 
 use serde_json::Value;
@@ -276,6 +276,88 @@ fn rollback_restoration_failure_leaves_a_pending_journal_and_can_retry() {
 }
 
 #[test]
+fn rollback_quarantine_allows_retry_after_old_link_restore_fails() {
+    let p = Fixture::new();
+    p.update_a();
+    let applied = p.user()["applied"].clone();
+    let mut created = None;
+    let failure = apply_with(&p.plan(), &mut |point| {
+        if point == Point::Commit {
+            created = Some(fs::symlink_metadata(p.destination("a"))?);
+            return Err(injected());
+        }
+        if point == Point::Rollback && !p.destination("a").is_symlink() {
+            return Err(injected());
+        }
+        Ok(())
+    })
+    .unwrap_err();
+    let report = failure.report().unwrap();
+    assert_eq!(report.ledger, LedgerState::Pending);
+    assert_eq!(report.operations[0].status, ApplyStatus::RollbackFailed);
+    assert_eq!(report.operations[0].observed, Some(Observed::Absent));
+    assert!(!p.destination("a").exists());
+    assert_eq!(p.user()["applied"], applied);
+    retry_with_retained_rollback_link(&p, &created.unwrap());
+}
+
+#[test]
+fn rollback_quarantine_allows_retry_after_ledger_restore_fails() {
+    let p = Fixture::new();
+    p.update_a();
+    let applied = p.user()["applied"].clone();
+    let old_target = fs::read_link(p.destination("a")).unwrap();
+    let mut created = None;
+    let failure = apply_with(&p.plan(), &mut |point| {
+        if point == Point::Commit {
+            created = Some(fs::symlink_metadata(p.destination("a"))?);
+        }
+        if matches!(point, Point::Commit | Point::RestoreLedger) {
+            return Err(injected());
+        }
+        Ok(())
+    })
+    .unwrap_err();
+    let report = failure.report().unwrap();
+    assert_eq!(report.ledger, LedgerState::Pending);
+    assert_eq!(report.operations[0].status, ApplyStatus::RolledBack);
+    assert!(report.recovery_error.is_some());
+    assert_eq!(fs::read_link(p.destination("a")).unwrap(), old_target);
+    assert_eq!(fs::read_to_string(p.destination("a")).unwrap(), "old a");
+    assert_eq!(p.user()["applied"], applied);
+    retry_with_retained_rollback_link(&p, &created.unwrap());
+}
+
+fn retry_with_retained_rollback_link(p: &Fixture, created: &fs::Metadata) {
+    let user = p.user();
+    let pending = &user["entries"][0]["pending"];
+    assert_eq!(pending["operation"], "update");
+    let rollback = pending["quarantines"].as_array().unwrap().last().unwrap();
+    let quarantine = p
+        .destination("a")
+        .with_file_name(rollback["name"].as_str().unwrap());
+    let retained = fs::symlink_metadata(&quarantine).unwrap();
+    assert!(retained.is_symlink());
+    assert_eq!(
+        (retained.dev(), retained.ino()),
+        (created.dev(), created.ino())
+    );
+    assert_eq!(fs::read_to_string(&quarantine).unwrap(), "new a");
+    assert_eq!(fs::read_to_string(p.destination("z")).unwrap(), "old z");
+    p.user_file_survives();
+
+    apply(&p.plan()).unwrap();
+    assert_eq!(
+        rollback["identity"],
+        serde_json::json!([created.dev(), created.ino()])
+    );
+    assert!(p.user()["entries"][0]["pending"].is_null());
+    assert_eq!(fs::read_to_string(p.destination("a")).unwrap(), "new a");
+    assert_eq!(fs::read_to_string(&quarantine).unwrap(), "new a");
+    p.user_file_survives();
+}
+
+#[test]
 fn pending_create_does_not_claim_an_identical_user_link() {
     let p = Fixture::new();
     let plan = p.plan();
@@ -477,10 +559,11 @@ fn commit_compare_and_swap_preserves_a_changed_journal() {
     .unwrap_err();
     let report = failure.report().unwrap();
     assert_eq!(report.ledger, LedgerState::Unknown);
-    assert_eq!(report.operations[0].status, ApplyStatus::RolledBack);
+    assert_eq!(report.operations[0].status, ApplyStatus::RollbackFailed);
+    assert!(report.recovery_error.is_some());
     assert_eq!(fs::read(p.ledger()).unwrap(), changed);
     assert_eq!(p.user()["applied"], previous);
-    assert_eq!(fs::read_to_string(p.destination("a")).unwrap(), "old a");
+    assert_eq!(fs::read_to_string(p.destination("a")).unwrap(), "new a");
     p.user_file_survives();
 }
 

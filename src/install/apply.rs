@@ -131,7 +131,7 @@ mod native {
     use super::*;
     use crate::install::actual::{
         Actual, Resolved, Roots, SnapshotCheck, check_quarantines, child, inspect_snapshot,
-        observe, private_layer,
+        node_identity, observe, private_layer,
     };
     use crate::install::fsops::{Fs, Point, QuarantineError, temp_name};
     use crate::install::ledger::{self, Entry, Intent, Pending, Quarantine, User};
@@ -166,23 +166,14 @@ mod native {
         let retirements: Vec<_> = plan
             .operations()
             .iter()
-            .map(|op| Retirements {
-                forward: old_target(op)
+            .map(|op| {
+                old_target(op)
                     .filter(|_| op.operation != OperationKind::Noop)
                     .map(|target| Quarantine {
                         name: temp_name("retired-link"),
                         target: target.to_owned(),
                         identity: Some(plan.actual.node_ids[&op.key()]),
-                    }),
-                rollback: op
-                    .link_target
-                    .as_deref()
-                    .filter(|_| op.source.is_some() && op.operation != OperationKind::Noop)
-                    .map(|target| Quarantine {
-                        name: temp_name("retired-link"),
-                        target: target.to_owned(),
-                        identity: None,
-                    }),
+                    })
             })
             .collect();
         let (journal, final_user) = users(plan, &retirements);
@@ -271,6 +262,7 @@ mod native {
                 &state,
                 &mut fs,
                 &mut links,
+                &journal,
                 &journal_digest,
                 &mut report,
             );
@@ -289,6 +281,7 @@ mod native {
                 &state,
                 &mut fs,
                 &mut links,
+                &journal,
                 &journal_digest,
                 &mut report,
             );
@@ -330,6 +323,7 @@ mod native {
                 &state,
                 &mut fs,
                 &mut links,
+                &journal,
                 &journal_digest,
                 &mut report,
             );
@@ -382,7 +376,7 @@ mod native {
         }
     }
 
-    fn users(plan: &Plan, retirements: &[Retirements]) -> (User, User) {
+    fn users(plan: &Plan, retirements: &[Option<Quarantine>]) -> (User, User) {
         use OperationKind::{Conflict, Create, Noop, Remove, Update};
         let old: BTreeMap<_, _> = plan
             .ledger
@@ -408,8 +402,7 @@ mod native {
             let mut quarantines = existing
                 .and_then(|entry| entry.pending.as_ref())
                 .map_or_else(Vec::new, |pending| pending.quarantines.clone());
-            quarantines.extend(retirement.forward.clone());
-            quarantines.extend(retirement.rollback.clone());
+            quarantines.extend(retirement.clone());
             let wanted = op.source.as_ref().map(|_| {
                 let layer = op.layer.expect("desired entry has a layer");
                 Entry {
@@ -498,20 +491,15 @@ mod native {
         Ok(())
     }
 
-    struct Retirements {
-        forward: Option<Quarantine>,
-        rollback: Option<Quarantine>,
-    }
-
     struct Links<'a> {
-        retirements: &'a [Retirements],
+        retirements: &'a [Option<Quarantine>],
         root: Option<Root>,
         parents: BTreeMap<Kind, Root>,
         undo: Vec<(usize, Undo)>,
     }
 
     enum Undo {
-        Delete,
+        Delete(Quarantine),
         Restore(PathBuf),
     }
 
@@ -562,7 +550,7 @@ mod native {
             if observe(Some(parent), &leaf)? != op.observed {
                 return Err(io::Error::other("destination changed after planning"));
             }
-            if let Some(item) = &self.retirements[index].forward {
+            if let Some(item) = &self.retirements[index] {
                 let point = if op.operation == OperationKind::Remove {
                     Point::Remove
                 } else {
@@ -573,7 +561,17 @@ mod native {
             }
             if let Some(wanted) = op.link_target.as_deref().filter(|_| op.source.is_some()) {
                 fs.link(parent, &leaf, wanted, Point::Create)?;
-                self.undo.push((index, Undo::Delete));
+                let identity = node_identity(parent, &leaf)
+                    .and_then(|id| id.ok_or_else(|| io::Error::other("created link disappeared")));
+                self.undo.push((
+                    index,
+                    Undo::Delete(Quarantine {
+                        name: temp_name("retired-link"),
+                        target: wanted.to_owned(),
+                        identity: identity.as_ref().ok().copied(),
+                    }),
+                ));
+                identity?;
             }
             fs.sync(parent)
         }
@@ -620,7 +618,37 @@ mod native {
             verify_snapshots(plan, state)
         }
 
-        fn rollback(&mut self, plan: &Plan, fs: &mut Fs<'_>, report: &mut ApplyReport) -> bool {
+        fn record_rollback(&self, plan: &Plan, journal: &mut User) -> bool {
+            let quarantines: BTreeMap<_, _> = self
+                .undo
+                .iter()
+                .filter_map(|(index, undo)| match undo {
+                    Undo::Delete(item) if item.identity.is_some() => {
+                        Some((plan.operations()[*index].destination.as_str(), item))
+                    }
+                    _ => None,
+                })
+                .collect();
+            for entry in &mut journal.entries {
+                if let Some(item) = quarantines.get(entry.destination.as_str()) {
+                    entry
+                        .pending
+                        .as_mut()
+                        .expect("created link has a pending entry")
+                        .quarantines
+                        .push((*item).clone());
+                }
+            }
+            !quarantines.is_empty()
+        }
+
+        fn rollback(
+            &mut self,
+            plan: &Plan,
+            fs: &mut Fs<'_>,
+            report: &mut ApplyReport,
+            journaled: bool,
+        ) -> bool {
             let mut clean = report
                 .operations
                 .iter()
@@ -630,15 +658,12 @@ mod native {
                 let parent = &self.parents[&op.kind];
                 let leaf = op.key().leaf();
                 let result = match undo {
-                    Undo::Delete => fs.retire(
-                        parent,
-                        &leaf,
-                        self.retirements[index]
-                            .rollback
-                            .as_ref()
-                            .expect("journaled rollback"),
-                        Point::Rollback,
-                    ),
+                    Undo::Delete(item) if journaled && item.identity.is_some() => {
+                        fs.retire(parent, &leaf, &item, Point::Rollback)
+                    }
+                    Undo::Delete(_) => {
+                        Err(io::Error::other("rollback link identity was not journaled"))
+                    }
                     Undo::Restore(target) => fs.link(parent, &leaf, &target, Point::Rollback),
                 }
                 .and_then(|()| fs.sync(parent));
@@ -682,12 +707,30 @@ mod native {
         state: &Root,
         fs: &mut Fs<'_>,
         links: &mut Links<'_>,
-        journal: &str,
+        journal: &User,
+        journal_digest: &str,
         report: &mut ApplyReport,
     ) {
-        if links.rollback(plan, fs, report) {
-            restore_ledger(plan, state, fs, journal, report);
-        } else if !ledger_matches(state, Some(journal)).unwrap_or(false) {
+        let mut rollback_journal = journal.clone();
+        let mut rollback_digest = None;
+        let prepared = (|| -> io::Result<()> {
+            if links.record_rollback(plan, &mut rollback_journal) {
+                let bytes = plan.ledger.encoded(&rollback_journal)?;
+                rollback_digest = Some(manifest::sha256(&bytes));
+                fs.persist(state, Some(journal_digest), Some(&bytes), Point::Journal)
+                    .map_err(|err| err.source)?;
+            }
+            Ok(())
+        })();
+        if let Err(err) = &prepared {
+            report.recovery_error = Some(err.to_string());
+        }
+        let current_digest = rollback_digest.as_deref().unwrap_or(journal_digest);
+        if links.rollback(plan, fs, report, prepared.is_ok()) {
+            restore_ledger(plan, state, fs, current_digest, report);
+        } else if !ledger_matches(state, Some(current_digest)).unwrap_or(false)
+            && !ledger_matches(state, Some(journal_digest)).unwrap_or(false)
+        {
             report.ledger = LedgerState::Unknown;
         }
     }

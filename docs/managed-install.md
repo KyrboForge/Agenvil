@@ -155,6 +155,8 @@ the diagnostic. Sync never auto-repairs an invalid ledger.
 Apply attempts to roll back completed link changes in reverse order and restore the prior
 ledger. An interruption or failed rollback can leave pending entries. Sync checks the journaled
 retirement paths on retry and reports the location of unexpected objects for manual recovery.
+Before rollback retires a link that apply created, it journals that link's identity, so a retained
+link from a failed restore is recognised on retry instead of blocking the next plan.
 
 If the final ledger was published but syncing its directory and restoring the journal both fail,
 apply reports `commit durability unconfirmed` and the visible ledger state. The same outcome
