@@ -6,6 +6,7 @@ pub mod config;
 pub mod diagnostics;
 pub mod discovery;
 pub mod frontmatter;
+pub mod install;
 pub mod inventory;
 pub mod manifest;
 pub mod report;

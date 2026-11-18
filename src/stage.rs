@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::fs::{self, File};
+use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
 
@@ -153,6 +153,11 @@ struct Scan {
 }
 
 fn scan(root: &Path) -> Result<Tree, ScanError> {
+    scan_with(root, &mut |_| {})
+}
+
+fn scan_with(root: &Path, before_open: &mut impl FnMut(&str)) -> Result<Tree, ScanError> {
+    let root = pinned::Root::open_scan(root)?;
     let limits = build::limits();
     let mut state = Scan {
         nodes: BTreeMap::new(),
@@ -162,85 +167,98 @@ fn scan(root: &Path) -> Result<Tree, ScanError> {
         max_file: limits.max_file_bytes,
         max_total: limits.max_total_bytes,
     };
-    walk(root, "", 0, &mut state)?;
+    walk(&root, "", 0, &mut state, before_open)?;
     Ok(Tree {
         nodes: state.nodes,
         runnable: state.runnable,
     })
 }
 
-fn walk(dir: &Path, under: &str, depth: usize, state: &mut Scan) -> Result<(), ScanError> {
+fn walk(
+    dir: &pinned::Root,
+    under: &str,
+    depth: usize,
+    state: &mut Scan,
+    before_open: &mut impl FnMut(&str),
+) -> Result<(), ScanError> {
     if depth > MAX_DEPTH {
         return Err(ScanError::Limit(format!(
             "directories are nested deeper than {MAX_DEPTH} levels at `{under}`"
         )));
     }
-    // Read at most one name past the budget, so a huge directory cannot exhaust memory first.
-    let mut names: Vec<_> = fs::read_dir(dir)?
-        .take(manifest::MAX_ENTRIES.saturating_sub(state.entries) + 1)
-        .map(|e| e.map(|e| e.file_name()))
-        .collect::<Result<_, _>>()?;
-    names.sort();
+    let names = dir
+        .names(manifest::MAX_ENTRIES.saturating_sub(state.entries))
+        .map_err(|err| {
+            if err
+                .get_ref()
+                .is_some_and(|cause| cause.is::<DirectoryEntryLimit>())
+            {
+                ScanError::Limit(format!("more than {} entries", manifest::MAX_ENTRIES))
+            } else {
+                ScanError::Io(err)
+            }
+        })?;
+    state.entries += names.len();
     for name in names {
-        state.entries += 1;
-        if state.entries > manifest::MAX_ENTRIES {
-            return Err(ScanError::Limit(format!(
-                "more than {} entries",
-                manifest::MAX_ENTRIES
-            )));
-        }
         let Some(text) = name.to_str() else {
             let shown = format!("{under}{}", name.to_string_lossy());
             state.nodes.insert(shown, Node::Unsafe(NOT_UTF8.to_owned()));
             continue;
         };
         let rel = format!("{under}{text}");
-        let path = dir.join(&name);
-        let meta = fs::symlink_metadata(&path)?;
-        let kind = meta.file_type();
-        if kind.is_dir() {
-            walk(&path, &format!("{rel}/"), depth + 1, state)?;
-        } else if kind.is_file() {
-            if meta.len() > state.max_file {
-                state.nodes.insert(rel, Node::Oversize(meta.len()));
-                continue;
+        let changed = || Node::Unsafe("changed while read".to_owned());
+        match dir.kind(&name)? {
+            Some(PathKind::Directory) => match dir.child(&name) {
+                Ok(Some(child)) => walk(&child, &format!("{rel}/"), depth + 1, state, before_open)?,
+                Ok(None) => {
+                    state.nodes.insert(rel, changed());
+                }
+                Err(err) if err.kind() == io::ErrorKind::NotADirectory => {
+                    state.nodes.insert(rel, changed());
+                }
+                Err(err) => return Err(err.into()),
+            },
+            Some(PathKind::File) => {
+                before_open(&rel);
+                let Some(file) = dir.open_file(text)? else {
+                    state.nodes.insert(rel, changed());
+                    continue;
+                };
+                let metadata = file.metadata()?;
+                if metadata.len() > state.max_file {
+                    state.nodes.insert(rel, Node::Oversize(metadata.len()));
+                    continue;
+                }
+                let available = state.max_total - state.bytes;
+                let over_budget =
+                    || ScanError::Limit(format!("more than {} bytes in staging", state.max_total));
+                if metadata.len() > available {
+                    return Err(over_budget());
+                }
+                #[cfg(unix)]
+                if std::os::unix::fs::PermissionsExt::mode(&metadata.permissions()) & 0o111 != 0 {
+                    state.runnable.insert(rel.clone());
+                }
+                let mut bytes = Vec::with_capacity(metadata.len() as usize);
+                file.take(state.max_file.min(available) + 1)
+                    .read_to_end(&mut bytes)?;
+                if bytes.len() as u64 > state.max_file {
+                    state.nodes.insert(rel, Node::Oversize(bytes.len() as u64));
+                } else if bytes.len() as u64 > available {
+                    return Err(over_budget());
+                } else {
+                    state.bytes += bytes.len() as u64;
+                    state.nodes.insert(rel, Node::File(bytes));
+                }
             }
-            state.bytes += meta.len();
-            if state.bytes > state.max_total {
-                return Err(ScanError::Limit(format!(
-                    "more than {} bytes in total",
-                    state.max_total
-                )));
+            kind => {
+                let what = match kind {
+                    Some(PathKind::Symlink) => "symlink",
+                    None => "changed while read",
+                    _ => "special file",
+                };
+                state.nodes.insert(rel, Node::Unsafe(what.to_owned()));
             }
-            let mut bytes = Vec::with_capacity(meta.len() as usize);
-            let mut file = File::open(&path)?;
-            // The path was a regular file a moment ago; if it was swapped, stop reading anyway.
-            if !file.metadata()?.is_file() {
-                state
-                    .nodes
-                    .insert(rel, Node::Unsafe("changed while it was read".to_owned()));
-                continue;
-            }
-            #[cfg(unix)]
-            if std::os::unix::fs::PermissionsExt::mode(&file.metadata()?.permissions()) & 0o111 != 0
-            {
-                state.runnable.insert(rel.clone());
-            }
-            (&mut file)
-                .take(state.max_file + 1)
-                .read_to_end(&mut bytes)?;
-            if bytes.len() as u64 > state.max_file {
-                state.nodes.insert(rel, Node::Oversize(bytes.len() as u64));
-            } else {
-                state.nodes.insert(rel, Node::File(bytes));
-            }
-        } else {
-            let what = if kind.is_symlink() {
-                "symlink"
-            } else {
-                "special file"
-            };
-            state.nodes.insert(rel, Node::Unsafe(what.to_owned()));
         }
     }
     Ok(())
@@ -304,17 +322,47 @@ pub fn check(
     out: &Path,
     expected: &[Entry],
 ) -> Result<Vec<Finding>, Error> {
+    Ok(checked_tree(root, config, out, expected)?.0)
+}
+
+pub(crate) fn approved_manifest(
+    root: &Path,
+    config: &Config,
+    out: &Path,
+    expected: &[Entry],
+) -> Result<Result<(manifest::Generator, String), Vec<Finding>>, Error> {
+    let (findings, tree) = checked_tree(root, config, out, expected)?;
+    if !findings.is_empty() {
+        return Ok(Err(findings));
+    }
+    let tree = tree.expect("a clean check has a staging tree");
+    let approved = load_manifest(&tree).expect("a clean check has a valid manifest");
+    let Node::File(bytes) = &tree.nodes[manifest::FILE] else {
+        unreachable!("a valid manifest is a regular file");
+    };
+    Ok(Ok((approved.generator, manifest::sha256(bytes))))
+}
+
+fn checked_tree(
+    root: &Path,
+    config: &Config,
+    out: &Path,
+    expected: &[Entry],
+) -> Result<(Vec<Finding>, Option<Tree>), Error> {
     if !build::location(root, config, out)? {
-        return Ok(vec![finding(
-            Kind::Missing,
-            ".",
-            "the staging directory does not exist; run `agenvil build --target claude`",
-        )]);
+        return Ok((
+            vec![finding(
+                Kind::Missing,
+                ".",
+                "the staging directory does not exist; run `agenvil build --target claude`",
+            )],
+            None,
+        ));
     }
     let tree = scan(out)?;
     let mut findings = compare(&tree, expected);
     findings.extend(validate_tree(&tree));
-    Ok(sorted(findings))
+    Ok((sorted(findings), Some(tree)))
 }
 
 fn compare(tree: &Tree, expected: &[Entry]) -> Vec<Finding> {
@@ -632,15 +680,42 @@ fn apply_cleanup(
 
 pub(crate) use pinned::read_under_root;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PathKind {
+    File,
+    Directory,
+    Symlink,
+    Other,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("directory entry limit exceeded")]
+struct DirectoryEntryLimit;
+
+fn push_name(
+    names: &mut Vec<std::ffi::OsString>,
+    name: std::ffi::OsString,
+    limit: usize,
+) -> io::Result<()> {
+    if names.len() == limit {
+        return Err(io::Error::other(DirectoryEntryLimit));
+    }
+    names.push(name);
+    Ok(())
+}
+
 /// Destructive cleanup steps that cannot be redirected outside the staging directory, even if
 /// it, a directory above it or one inside it is swapped for a symlink or junction while they run.
 #[cfg(unix)]
-mod pinned {
+pub(crate) mod pinned {
+    use std::ffi::OsStr;
     use std::fs::File;
     use std::io::{self, Read, Write};
-    use std::os::fd::OwnedFd;
-    use std::path::{Component, Path};
+    use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::{Component, Path, PathBuf};
 
+    use super::PathKind;
     use crate::diagnostics::ProblemKind;
 
     use rustix::fs::{AtFlags, CWD, Mode, OFlags, fstat, openat, renameat, statat, unlinkat};
@@ -725,36 +800,108 @@ mod pinned {
     /// component at a time, never following a link.
     pub struct Root(OwnedFd);
 
+    impl AsFd for Root {
+        fn as_fd(&self) -> BorrowedFd<'_> {
+            self.0.as_fd()
+        }
+    }
+
     impl Root {
+        pub(crate) fn open_scan(path: &Path) -> io::Result<Self> {
+            let path: PathBuf = path.components().collect();
+            Ok(Self(openat(CWD, path, DIR, Mode::empty())?))
+        }
+
+        pub(crate) fn open_file(&self, name: &str) -> io::Result<Option<File>> {
+            let file = match openat(self, name, FILE, Mode::empty()) {
+                Ok(fd) => File::from(fd),
+                Err(err) if moved(err) => return Ok(None),
+                Err(err) => return Err(err.into()),
+            };
+            Ok(file.metadata()?.is_file().then_some(file))
+        }
+
         /// Opens the resolved, absolute `out` from `/`, one component at a time, never following
         /// a link. `None`: a directory on the way is no longer one.
         pub fn open(out: &Path) -> io::Result<Option<Self>> {
-            let mut dir = openat(CWD, "/", DIR, Mode::empty())?;
+            match Self::open_checked(out) {
+                Err(e) if e.kind() == io::ErrorKind::NotADirectory => Ok(None),
+                result => result,
+            }
+        }
+
+        pub(crate) fn open_checked(out: &Path) -> io::Result<Option<Self>> {
+            let mut dir = Self(openat(CWD, "/", DIR, Mode::empty())?);
             for part in out.components() {
                 if let Component::Normal(part) = part {
-                    dir = match openat(&dir, part, DIR, Mode::empty()) {
-                        Ok(fd) => fd,
-                        Err(e) if moved(e) => return Ok(None),
-                        Err(e) => return Err(e.into()),
+                    dir = match dir.child(part)? {
+                        Some(child) => child,
+                        None => return Ok(None),
                     };
                 }
             }
-            Ok(Some(Self(dir)))
+            Ok(Some(dir))
+        }
+
+        pub(crate) fn child(&self, name: &OsStr) -> io::Result<Option<Self>> {
+            match openat(self, name, DIR, Mode::empty()) {
+                Ok(fd) => Ok(Some(Self(fd))),
+                Err(Errno::NOENT) => Ok(None),
+                Err(e) if moved(e) => Err(io::ErrorKind::NotADirectory.into()),
+                Err(e) => Err(e.into()),
+            }
+        }
+
+        pub(crate) fn kind(&self, name: &OsStr) -> io::Result<Option<PathKind>> {
+            use rustix::fs::FileType;
+            match statat(self, name, AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(stat) => Ok(Some(match FileType::from_raw_mode(stat.st_mode) {
+                    FileType::RegularFile => PathKind::File,
+                    FileType::Directory => PathKind::Directory,
+                    FileType::Symlink => PathKind::Symlink,
+                    _ => PathKind::Other,
+                })),
+                Err(Errno::NOENT) => Ok(None),
+                Err(e) => Err(e.into()),
+            }
+        }
+
+        pub(crate) fn link(&self, name: &OsStr) -> io::Result<PathBuf> {
+            let target = rustix::fs::readlinkat(self, name, Vec::new())?;
+            Ok(PathBuf::from(OsStr::from_bytes(target.as_bytes())))
+        }
+
+        pub(crate) fn names(&self, limit: usize) -> io::Result<Vec<std::ffi::OsString>> {
+            let mut names = Vec::new();
+            for entry in rustix::fs::Dir::read_from(self)? {
+                let entry = entry?;
+                let name = entry.file_name().to_bytes();
+                if name != b"." && name != b".." {
+                    super::push_name(&mut names, OsStr::from_bytes(name).to_owned(), limit)?;
+                }
+            }
+            names.sort();
+            Ok(names)
         }
 
         /// At most `limit` bytes of `name`, a plain file directly in the root; `None` if it is not one.
         pub fn read(&self, name: &str, limit: u64) -> io::Result<Option<Vec<u8>>> {
-            let file = match openat(&self.0, name, FILE, Mode::empty()) {
-                Ok(fd) => File::from(fd),
-                Err(e) if moved(e) => return Ok(None),
-                Err(e) => return Err(e.into()),
-            };
-            if !file.metadata()?.is_file() {
+            Ok(self.read_mode(name, limit)?.map(|(bytes, _)| bytes))
+        }
+
+        pub(crate) fn read_mode(
+            &self,
+            name: &str,
+            limit: u64,
+        ) -> io::Result<Option<(Vec<u8>, u32)>> {
+            use std::os::unix::fs::PermissionsExt;
+            let Some(file) = self.open_file(name)? else {
                 return Ok(None);
-            }
+            };
+            let metadata = file.metadata()?;
             let mut bytes = Vec::new();
             file.take(limit).read_to_end(&mut bytes)?;
-            Ok(Some(bytes))
+            Ok(Some((bytes, metadata.permissions().mode() & 0o7777)))
         }
 
         /// Deletes `rel` if `verify` accepts the open file, then prunes the directories that
@@ -824,12 +971,15 @@ mod pinned {
 /// the file is opened that way and checked not to be a reparse point (symlink or junction), so
 /// the path cannot lead anywhere else.
 #[cfg(windows)]
-mod pinned {
+pub(crate) mod pinned {
+    use std::ffi::OsStr;
     use std::fs::{self, File, OpenOptions};
     use std::io::{self, Read, Write};
     use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
     use std::path::{Component, Path, PathBuf};
+    use std::sync::Arc;
 
+    use super::PathKind;
     use crate::diagnostics::ProblemKind;
 
     const FILE_SHARE_READ: u32 = 0x1;
@@ -913,13 +1063,33 @@ mod pinned {
 
     pub struct Root {
         path: PathBuf,
-        _pins: Vec<File>,
+        pins: Vec<Arc<File>>,
     }
 
     impl Root {
+        pub(crate) fn open_scan(path: &Path) -> io::Result<Self> {
+            let path = std::path::absolute(path)?;
+            let path = match (path.parent(), path.file_name()) {
+                (Some(parent), Some(name)) => fs::canonicalize(parent)?.join(name),
+                _ => path,
+            };
+            Self::open_checked(&path)?.ok_or(io::ErrorKind::NotFound.into())
+        }
+
+        pub(crate) fn open_file(&self, name: &str) -> io::Result<Option<File>> {
+            pin(&self.path.join(name), false)
+        }
+
         /// Pins the resolved, absolute `out` and every directory above it. `None`: one of them
         /// is no longer a plain directory.
         pub fn open(out: &Path) -> io::Result<Option<Self>> {
+            match Self::open_checked(out) {
+                Err(e) if e.kind() == io::ErrorKind::NotADirectory => Ok(None),
+                result => result,
+            }
+        }
+
+        pub(crate) fn open_checked(out: &Path) -> io::Result<Option<Self>> {
             let mut path = PathBuf::new();
             let mut pins = Vec::new();
             for part in out.components() {
@@ -928,16 +1098,77 @@ mod pinned {
                     continue;
                 }
                 match pin(&path, true)? {
-                    Some(pin) => pins.push(pin),
-                    None => return Ok(None),
+                    Some(pin) => pins.push(Arc::new(pin)),
+                    None => return Self::missing_directory(&path),
                 }
             }
-            Ok(Some(Self { path, _pins: pins }))
+            Ok(Some(Self { path, pins }))
+        }
+
+        fn missing_directory(path: &Path) -> io::Result<Option<Self>> {
+            match fs::symlink_metadata(path) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(e),
+                Ok(_) => Err(io::ErrorKind::NotADirectory.into()),
+            }
+        }
+
+        pub(crate) fn child(&self, name: &OsStr) -> io::Result<Option<Self>> {
+            let path = self.path.join(name);
+            let Some(file) = pin(&path, true)? else {
+                return Self::missing_directory(&path);
+            };
+            let mut pins = self.pins.clone();
+            pins.push(Arc::new(file));
+            Ok(Some(Self { path, pins }))
+        }
+
+        pub(crate) fn canonical_path(&self) -> io::Result<PathBuf> {
+            fs::canonicalize(&self.path)
+        }
+
+        pub(crate) fn kind(&self, name: &OsStr) -> io::Result<Option<PathKind>> {
+            match fs::symlink_metadata(self.path.join(name)) {
+                Ok(meta) => Ok(Some(if meta.file_type().is_symlink() {
+                    PathKind::Symlink
+                } else if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                    PathKind::Other
+                } else if meta.is_dir() {
+                    PathKind::Directory
+                } else if meta.is_file() {
+                    PathKind::File
+                } else {
+                    PathKind::Other
+                })),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(e),
+            }
+        }
+
+        pub(crate) fn link(&self, name: &OsStr) -> io::Result<PathBuf> {
+            fs::read_link(self.path.join(name))
+        }
+
+        pub(crate) fn names(&self, limit: usize) -> io::Result<Vec<std::ffi::OsString>> {
+            let mut names = Vec::new();
+            for entry in fs::read_dir(&self.path)? {
+                super::push_name(&mut names, entry?.file_name(), limit)?;
+            }
+            names.sort();
+            Ok(names)
+        }
+
+        pub(crate) fn read_mode(
+            &self,
+            name: &str,
+            limit: u64,
+        ) -> io::Result<Option<(Vec<u8>, u32)>> {
+            Ok(self.read(name, limit)?.map(|bytes| (bytes, 0)))
         }
 
         /// At most `limit` bytes of `name`, a plain file directly in the root; `None` if it is not one.
         pub fn read(&self, name: &str, limit: u64) -> io::Result<Option<Vec<u8>>> {
-            let Some(file) = pin(&self.path.join(name), false)? else {
+            let Some(file) = self.open_file(name)? else {
                 return Ok(None);
             };
             let mut bytes = Vec::new();
@@ -1316,6 +1547,36 @@ mod tests {
     use super::*;
     use crate::manifest::Transform;
     use std::path::PathBuf;
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_scan_rejects_link_and_fifo_replacements_before_open() {
+        let stage = tempfile::tempdir().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        fs::write(outside.path(), "outside staging").unwrap();
+        for name in ["link", "pipe"] {
+            fs::write(stage.path().join(name), "ordinary file").unwrap();
+        }
+        let tree = scan_with(stage.path(), &mut |name| {
+            let path = stage.path().join(name);
+            fs::remove_file(&path).unwrap();
+            match name {
+                "link" => std::os::unix::fs::symlink(outside.path(), path).unwrap(),
+                "pipe" => assert!(
+                    std::process::Command::new("mkfifo")
+                        .arg(path)
+                        .status()
+                        .unwrap()
+                        .success()
+                ),
+                _ => unreachable!(),
+            }
+        })
+        .unwrap();
+        for name in ["link", "pipe"] {
+            assert!(matches!(&tree.nodes[name], Node::Unsafe(_)));
+        }
+    }
 
     fn join(dir: &Path, rel: &str) -> PathBuf {
         rel.split('/')

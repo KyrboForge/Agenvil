@@ -8,6 +8,7 @@ use crate::build;
 use crate::config::{Config, ConfigError};
 use crate::diagnostics::Exit;
 use crate::discovery::{Limits, OverlapError};
+use crate::install;
 use crate::inventory::Inventory;
 use crate::report;
 use crate::stage;
@@ -81,6 +82,22 @@ pub enum Command {
         #[arg(long, requires = "clean")]
         apply: bool,
     },
+    /// Plan or apply managed Claude resource links
+    Sync {
+        #[arg(long, value_enum)]
+        target: Target,
+        /// Approved staging directory [default: <root>/.generated/claude]
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
+        /// Apply the plan to the user configuration
+        #[arg(long)]
+        apply: bool,
+        /// Print the plan without making changes (the default)
+        #[arg(long, conflicts_with = "apply")]
+        dry_run: bool,
+        #[arg(long, value_enum, default_value_t = SyncFormat::Human)]
+        format: SyncFormat,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -90,6 +107,12 @@ pub enum Target {
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum Format {
+    Json,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum SyncFormat {
+    Human,
     Json,
 }
 
@@ -129,6 +152,14 @@ enum Error {
     UnknownRule(String),
     #[error("could not serialize the output: {0}")]
     Serialize(#[from] serde_json::Error),
+    #[error(transparent)]
+    SyncPlan(#[from] install::PlanError),
+    #[error(transparent)]
+    SyncApply(#[from] install::ApplyError),
+    #[error("could not determine your home directory for sync")]
+    NoHome,
+    #[error("the sync plan has {0} unsafe destination(s); check the directory paths")]
+    UnsafeSync(usize),
     /// Output was printed, but problems mean it is incomplete.
     #[error("{0} problem(s) found; the result above is incomplete")]
     Incomplete(usize),
@@ -157,9 +188,13 @@ impl Error {
             | Self::Overlap(_)
             | Self::Settings(_)
             | Self::UnknownRule(_)
-            | Self::UnsafeTree(_) => Exit::Usage,
+            | Self::UnsafeTree(_)
+            | Self::NoHome
+            | Self::UnsafeSync(_) => Exit::Usage,
             Self::Incomplete(_) | Self::Unavailable(_) => Exit::Unverifiable,
             Self::Build(error) => error.exit(),
+            Self::SyncPlan(error) => error.exit(),
+            Self::SyncApply(error) => error.exit(),
             Self::Findings(_) | Self::Drift(_) => Exit::Findings,
             Self::Serialize(_) => Exit::Internal,
         }
@@ -303,10 +338,98 @@ fn execute(cli: &Cli) -> Result<(), Error> {
             );
             Ok(())
         }
+        Command::Sync {
+            target: Target::Claude,
+            out,
+            apply,
+            format,
+            ..
+        } => {
+            let out = out.clone().unwrap_or_else(|| root.join(build::DEFAULT_OUT));
+            sync(root, &config, &out, *apply, *format)
+        }
         Command::Rules | Command::Explain { .. } => {
             unreachable!("handled before the config is loaded")
         }
     }
+}
+
+fn sync(
+    root: &Path,
+    config: &Config,
+    out: &Path,
+    apply: bool,
+    format: SyncFormat,
+) -> Result<(), Error> {
+    let home = std::env::home_dir().ok_or(Error::NoHome)?;
+    let locations = install::Locations {
+        claude_root: std::env::var_os("CLAUDE_CONFIG_DIR")
+            .filter(|path| !path.is_empty())
+            .map_or_else(|| home.join(".claude"), PathBuf::from),
+        local_root: home.join(".agents.local"),
+    };
+    let plan = install::plan(root, config, out, &locations).inspect_err(|error| {
+        if let install::PlanError::Staging { out, findings } = error {
+            eprint!("{}", stage::report(out, findings));
+        }
+    })?;
+    match format {
+        SyncFormat::Json => println!("{}", serde_json::to_string_pretty(&plan)?),
+        SyncFormat::Human => {
+            println!("Claude config at {}", plan.root().display());
+            for op in plan.operations() {
+                print!("{:?} {}", op.operation, op.destination);
+                if let Some(target) = &op.link_target {
+                    print!(" -> {}", target.display());
+                }
+                println!(" ({})", op.reason);
+            }
+            for snapshot in plan.snapshots() {
+                if snapshot.status != install::SnapshotStatus::Verified {
+                    println!("{:?} snapshot {}", snapshot.status, snapshot.path.display());
+                }
+            }
+            for entry in plan.ignored() {
+                println!("Ignored private {} ({:?})", entry.path, entry.reason);
+            }
+            let counts = plan.summary();
+            println!(
+                "{} create, {} update, {} remove, {} unchanged, {} conflict",
+                counts.create, counts.update, counts.remove, counts.noop, counts.conflict
+            );
+        }
+    }
+    let unsafe_count = plan
+        .operations()
+        .iter()
+        .filter(|op| {
+            op.reason == install::Reason::Conflict(install::ConflictReason::UnsafeAncestor)
+        })
+        .count();
+    if unsafe_count != 0 {
+        return Err(Error::UnsafeSync(unsafe_count));
+    }
+    if plan.has_conflicts() {
+        return Err(install::ApplyError::Conflicts {
+            count: plan.summary().conflict,
+        }
+        .into());
+    }
+    if apply {
+        match install::apply(&plan) {
+            Ok(report) if matches!(format, SyncFormat::Human) => {
+                println!("Ledger {:?}", report.ledger)
+            }
+            Ok(_) => {}
+            Err(error) => {
+                if let Some(report) = error.report() {
+                    eprintln!("{}", serde_json::to_string_pretty(report)?);
+                }
+                return Err(error.into());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Prints the findings, then picks the exit: an unsafe tree is a usage error (2), any other
