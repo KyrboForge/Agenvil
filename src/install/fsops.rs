@@ -374,7 +374,12 @@ mod native {
         }
     }
 
-    fn write_file(parent: &Root, name: &str, bytes: &[u8], mode: u32) -> io::Result<()> {
+    pub(in crate::install) fn write_file(
+        parent: &Root,
+        name: &str,
+        bytes: &[u8],
+        mode: u32,
+    ) -> io::Result<()> {
         let flags =
             OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
         let mut file = File::from(fs::openat(parent, name, flags, Mode::from_raw_mode(0o600))?);
@@ -394,11 +399,16 @@ mod native {
             .map(manifest::sha256))
     }
 
-    fn rename_new(dir: &Root, from: &str, to: &str) -> io::Result<()> {
+    pub(in crate::install) fn rename_new(dir: &Root, from: &str, to: &str) -> io::Result<()> {
         rename_with(dir, from, to, RenameFlags::NOREPLACE)
     }
 
-    fn rename_with(dir: &Root, from: &str, to: &str, flags: RenameFlags) -> io::Result<()> {
+    pub(in crate::install) fn rename_with(
+        dir: &Root,
+        from: &str,
+        to: &str,
+        flags: RenameFlags,
+    ) -> io::Result<()> {
         match fs::renameat_with(dir, from, dir, to, flags) {
             Ok(()) => Ok(()),
             Err(Errno::NOSYS | Errno::OPNOTSUPP | Errno::INVAL) => Err(io::Error::new(
@@ -411,4 +421,4 @@ mod native {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(super) use native::{Fs, Point, QuarantineError};
+pub(super) use native::{Fs, Point, QuarantineError, rename_new, rename_with, write_file};

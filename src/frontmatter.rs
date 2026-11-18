@@ -96,7 +96,15 @@ fn parse_yaml(yaml: &str) -> Result<Map<String, Value>, ParseError> {
     }
     match serde_saphyr::from_str_with_options::<Option<Map<String, Value>>>(yaml, options) {
         // An empty block is YAML `null`, and means "no fields".
-        Ok(metadata) => Ok(metadata.unwrap_or_default()),
+        Ok(metadata) => {
+            // serde_json keeps insertion order (for settings merging); metadata stays sorted.
+            let mut metadata = Value::Object(metadata.unwrap_or_default());
+            metadata.sort_all_objects();
+            let Value::Object(metadata) = metadata else {
+                unreachable!("an object stays an object")
+            };
+            Ok(metadata)
+        }
         Err(error) => {
             let render = render_options! {
                 line_offset: LINES_BEFORE_YAML,

@@ -3,8 +3,9 @@
 Sync reconciles Claude Code's user-level agents, skills and rules from an approved staging tree
 and the local private layer. It is the low-level, offline reconcile command and does no Git work.
 Future `init` and `update` commands are the user-facing onboarding and update path that will
-consume this reconcile step. Doctor, uninstall, restore, `settings.json` merging and a Codex
-adapter are future work.
+consume this reconcile step. Doctor, uninstall, restore and a Codex adapter are future work.
+Managed `settings.json` values and hooks are merged by a separate command; see
+[`managed-settings.md`](managed-settings.md).
 
 ## Running it
 
