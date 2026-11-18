@@ -35,13 +35,13 @@ pub enum LedgerError {
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Envelope {
-    schema: u32,
-    generator: manifest::Generator,
-    harnesses: BTreeMap<String, Box<RawValue>>,
+pub(super) struct Envelope {
+    pub schema: u32,
+    pub generator: manifest::Generator,
+    pub harnesses: BTreeMap<String, Box<RawValue>>,
 }
 
-type Scopes = BTreeMap<String, Box<RawValue>>;
+pub(super) type Scopes = BTreeMap<String, Box<RawValue>>;
 
 pub(super) const RETIRED_PREFIX: &str = ".tmp-agenvil-retired-link-";
 pub(super) type NodeId = (u64, u64);
@@ -356,8 +356,7 @@ pub(super) fn read_bytes(state: Option<&Root>) -> io::Result<Option<Vec<u8>>> {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn generator() -> manifest::Generator {
+pub(super) fn generator() -> manifest::Generator {
     manifest::Generator {
         name: manifest::OWNER.to_owned(),
         version: env!("CARGO_PKG_VERSION").to_owned(),

@@ -98,6 +98,30 @@ pub enum Command {
         #[arg(long, value_enum, default_value_t = SyncFormat::Human)]
         format: SyncFormat,
     },
+    /// Plan or apply managed Claude settings values and hooks (needs no config)
+    Settings {
+        #[arg(long, value_enum)]
+        target: Target,
+        /// Settings fragment JSON to install
+        #[arg(
+            long,
+            value_name = "FILE",
+            required_unless_present = "remove",
+            conflicts_with = "remove"
+        )]
+        fragment: Option<PathBuf>,
+        /// Remove everything Agenvil recorded as managed
+        #[arg(long)]
+        remove: bool,
+        /// Apply the plan to the user settings
+        #[arg(long)]
+        apply: bool,
+        /// Print the plan without making changes (the default)
+        #[arg(long, conflicts_with = "apply")]
+        dry_run: bool,
+        #[arg(long, value_enum, default_value_t = SyncFormat::Human)]
+        format: SyncFormat,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -156,6 +180,10 @@ enum Error {
     SyncPlan(#[from] install::PlanError),
     #[error(transparent)]
     SyncApply(#[from] install::ApplyError),
+    #[error(transparent)]
+    ManagedSettings(#[from] install::settings::Error),
+    #[error(transparent)]
+    ManagedApply(#[from] install::settings::ApplyError),
     #[error("could not determine your home directory for sync")]
     NoHome,
     #[error("the sync plan has {0} unsafe destination(s); check the directory paths")]
@@ -195,6 +223,8 @@ impl Error {
             Self::Build(error) => error.exit(),
             Self::SyncPlan(error) => error.exit(),
             Self::SyncApply(error) => error.exit(),
+            Self::ManagedSettings(error) => error.exit(),
+            Self::ManagedApply(error) => error.exit(),
             Self::Findings(_) | Self::Drift(_) => Exit::Findings,
             Self::Serialize(_) => Exit::Internal,
         }
@@ -225,6 +255,13 @@ fn execute(cli: &Cli) -> Result<(), Error> {
             print!("{}", explain(rule));
             return Ok(());
         }
+        Command::Settings {
+            target: Target::Claude,
+            fragment,
+            apply,
+            format,
+            ..
+        } => return settings(fragment.as_deref(), *apply, *format),
         _ => {}
     }
     // Load first so a broken config is never mistaken for a clean or merely unimplemented run.
@@ -348,7 +385,7 @@ fn execute(cli: &Cli) -> Result<(), Error> {
             let out = out.clone().unwrap_or_else(|| root.join(build::DEFAULT_OUT));
             sync(root, &config, &out, *apply, *format)
         }
-        Command::Rules | Command::Explain { .. } => {
+        Command::Rules | Command::Explain { .. } | Command::Settings { .. } => {
             unreachable!("handled before the config is loaded")
         }
     }
@@ -361,14 +398,7 @@ fn sync(
     apply: bool,
     format: SyncFormat,
 ) -> Result<(), Error> {
-    let home = std::env::home_dir().ok_or(Error::NoHome)?;
-    let locations = install::Locations {
-        claude_root: std::env::var_os("CLAUDE_CONFIG_DIR")
-            .filter(|path| !path.is_empty())
-            .map_or_else(|| home.join(".claude"), PathBuf::from),
-        local_root: home.join(".agents.local"),
-    };
-    let plan = install::plan(root, config, out, &locations).inspect_err(|error| {
+    let plan = install::plan(root, config, out, &locations()?).inspect_err(|error| {
         if let install::PlanError::Staging { out, findings } = error {
             eprint!("{}", stage::report(out, findings));
         }
@@ -427,6 +457,58 @@ fn sync(
                 }
                 return Err(error.into());
             }
+        }
+    }
+    Ok(())
+}
+
+/// The user's Claude root (`CLAUDE_CONFIG_DIR`, else `~/.claude`) and `~/.agents.local`.
+fn locations() -> Result<install::Locations, Error> {
+    let home = std::env::home_dir().ok_or(Error::NoHome)?;
+    Ok(install::Locations {
+        claude_root: std::env::var_os("CLAUDE_CONFIG_DIR")
+            .filter(|path| !path.is_empty())
+            .map_or_else(|| home.join(".claude"), PathBuf::from),
+        local_root: home.join(".agents.local"),
+    })
+}
+
+/// Plans a fragment install, or removal when there is no fragment; applies it only with `--apply`.
+fn settings(fragment: Option<&Path>, apply: bool, format: SyncFormat) -> Result<(), Error> {
+    use install::settings;
+    let fragment = fragment.map(settings::Fragment::read).transpose()?;
+    let plan = settings::plan(&locations()?, fragment.as_ref())?;
+    match format {
+        SyncFormat::Json => println!("{}", serde_json::to_string_pretty(&plan)?),
+        SyncFormat::Human => {
+            println!("Claude config at {}", plan.root.display());
+            for op in &plan.operations {
+                print!("{:?} {:?} {}", op.operation, op.kind, op.target);
+                if let Some(event) = &op.event {
+                    print!(" [{event}]");
+                }
+                println!(" ({:?}, {})", op.ownership, op.reason);
+            }
+            for file in [&plan.files.settings, &plan.files.state] {
+                println!("{:?} {}", file.action, file.path.display());
+            }
+            let counts = &plan.summary;
+            println!(
+                "{} add, {} change, {} remove, {} unchanged, {} conflict",
+                counts.add, counts.change, counts.remove, counts.noop, counts.conflict
+            );
+        }
+    }
+    if plan.has_conflicts() {
+        return Err(settings::ApplyError::Conflicts {
+            count: plan.summary.conflict,
+        }
+        .into());
+    }
+    if apply {
+        let backup = settings::apply(&plan)?;
+        if let (Some(backup), SyncFormat::Human) = (backup, format) {
+            println!("Backup {}", backup.display());
         }
     }
     Ok(())

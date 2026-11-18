@@ -6,6 +6,7 @@ mod desired;
 mod fsops;
 mod ledger;
 mod plan;
+pub mod settings;
 
 pub use apply::{
     ApplyError, ApplyReport, ApplyStatus, ApplyStep, LedgerState, OperationReport, apply,

@@ -34,6 +34,7 @@ For existing TAK-style configurations, see [migration guidance](docs/compatibili
 | `agenvil build --target claude --clean [--apply]` | dry run unless `--apply` | remove stale generated files, only those whose digests still match ([`docs/build.md`](docs/build.md#cleanup---clean)) |
 | `agenvil build --target claude [--out DIR]` | writes `.generated/claude/` | build a Claude-native staging tree from the sources; never installs, never touches `~/.claude` ([`docs/build.md`](docs/build.md)) |
 | `agenvil sync --target claude [--dry-run\|--apply] [--out DIR] [--format human\|json]` | dry run unless `--apply`, offline | reconcile user-level Claude agents, skills and rules from approved staging and the private layer ([`docs/managed-install.md`](docs/managed-install.md)) |
+| `agenvil settings --target claude (--fragment FILE\|--remove) [--dry-run\|--apply] [--format human\|json]` | dry run unless `--apply`, offline | merge managed values and hooks into the user-level `settings.json`, with ownership, backups and conflicts ([`docs/managed-settings.md`](docs/managed-settings.md)) |
 
 `--root <DIR>` selects the project root; the default is the current directory. The config file is
 `<root>/agenvil.toml` unless `--config <FILE>` overrides it (no search of parent directories). It must be a regular file of at
