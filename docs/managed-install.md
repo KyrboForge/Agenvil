@@ -2,10 +2,9 @@
 
 Sync reconciles Claude Code's user-level agents, skills and rules from an approved staging tree
 and the local private layer. It is the low-level, offline reconcile command and does no Git work.
-Future `init` and `update` commands are the user-facing onboarding and update path that will
-consume this reconcile step. Doctor, uninstall, restore and a Codex adapter are future work.
-Managed `settings.json` values and hooks are merged by a separate command; see
-[`managed-settings.md`](managed-settings.md).
+Future `init` and `update` commands can compose this reconcile step. Sync does not touch
+settings. Use the separate [settings command](managed-settings.md) to merge values and hooks.
+See the [lifecycle guide](lifecycle.md) for doctor, uninstall and settings restore.
 
 ## Running it
 
@@ -59,9 +58,9 @@ Until then:
 
 - Keep syncing from the recorded checkout path. Moving a checkout back, or cloning it again at the
   same path, restores sync because the path is the identity.
-- To switch to a different checkout or kit, retire the old install by hand: remove the links listed
-  in `~/.agents.local/state/ownership.json` from the Claude config root, move that ledger file
-  somewhere safe, then sync from the new checkout. Snapshots can stay where they are.
+- To switch to another checkout or kit, [uninstall the recorded install](lifecycle.md#uninstall),
+  resolve any reported conflicts, then build and sync from the new checkout. Uninstall also
+  handles managed settings. Snapshots stay in place.
 
 Each agent or rule gets its own file symlink under `agents/` or `rules/`. Each skill gets its own
 directory symlink under `skills/`, including its supporting files. Sync never replaces any of the
@@ -180,7 +179,7 @@ as described under [Kit ownership and checkouts](#kit-ownership-and-checkouts).
 | A pending destination matches neither recorded target and is still occupied | Review the apply report and preserve the occupant. If you intend to resume at that destination, move the occupant somewhere safe before retrying. |
 | An occupied pending create | Move the occupant somewhere safe before retrying. A matching target does not establish ownership. |
 | Two destination spellings resolve to the same entry | Resolve the case-only collision before applying. The existing link stays in place. |
-| The requested kit or checkout path differs from the ledger's | Run sync from the recorded checkout path with the recorded kit, or retire the old install by hand as described under [Kit ownership and checkouts](#kit-ownership-and-checkouts). |
+| The requested kit or checkout path differs from the ledger's | Run sync from the recorded checkout path with the recorded kit, or uninstall the recorded install as described under [Kit ownership and checkouts](#kit-ownership-and-checkouts). |
 | A journaled retirement name holds an unexpected object | Preserve the object at the path reported by sync. Move it somewhere safe before retrying and review the original destination. |
 
 A broken managed link still has its recorded target text. Apply can restore a missing snapshot
@@ -213,9 +212,12 @@ visible. `Unknown` means sync could not identify the visible generation.
 3. Re-run `agenvil sync --target claude --apply` with the same options. Leave the journal in place
    so sync can recover it.
 
-Retirement leaves hidden `.tmp-agenvil-retired-link-*` entries beside Claude resources. Ledger
-publication can leave `.tmp-agenvil-ledger-*` generations in state. Sync keeps these entries because
-the filesystem offers no identity-conditional unlink. Temporary snapshot directories also stay
+Retirement creates hidden `.tmp-agenvil-retired-link-*` entries beside Claude resources.
+After committing link removal, uninstall checks journaled retired links against their
+recorded targets and filesystem identities before removing them. Cleanup errors name
+the affected paths. If interrupted after the commit, the preceding ledger generation
+records the cleanup paths. Sync keeps retired links for manual recovery. Ledger publication can
+leave `.tmp-agenvil-ledger-*` generations in state. Temporary snapshot directories stay
 inert. An interruption between a ledger exchange and verification can leave the candidate at
 `ownership.json` and the displaced generation under its temporary name. Preserve both if that
 interruption is suspected, and preserve any temporary entry named in an error until recovery is

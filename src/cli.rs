@@ -8,7 +8,9 @@ use crate::build;
 use crate::config::{Config, ConfigError};
 use crate::diagnostics::Exit;
 use crate::discovery::{Limits, OverlapError};
+use crate::doctor;
 use crate::install;
+use crate::install::lifecycle;
 use crate::inventory::Inventory;
 use crate::report;
 use crate::stage;
@@ -122,6 +124,52 @@ pub enum Command {
         #[arg(long, value_enum, default_value_t = SyncFormat::Human)]
         format: SyncFormat,
     },
+    /// Diagnose the Claude installation and its source and staging trees (read-only)
+    Doctor {
+        #[arg(long, value_enum)]
+        target: Target,
+        /// Approved staging directory [default: <root>/.generated/claude]
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = SyncFormat::Human)]
+        format: SyncFormat,
+    },
+    /// Detach managed Claude links and settings (needs no config)
+    Uninstall {
+        #[arg(long, value_enum)]
+        target: Target,
+        /// Apply the plan to user configuration
+        #[arg(long)]
+        apply: bool,
+        /// Print the plan without making changes (the default)
+        #[arg(long, conflicts_with = "apply")]
+        dry_run: bool,
+        #[arg(long, value_enum, default_value_t = SyncFormat::Human)]
+        format: SyncFormat,
+    },
+    /// List or restore managed Claude settings backups (needs no config)
+    Restore {
+        #[arg(long, value_enum)]
+        target: Target,
+        /// List settings backups, newest first
+        #[arg(
+            long,
+            required_unless_present = "backup",
+            conflicts_with_all = ["backup", "apply", "dry_run"]
+        )]
+        list: bool,
+        /// Name of the settings backup to restore
+        #[arg(long, value_name = "NAME")]
+        backup: Option<String>,
+        /// Restore the selected backup
+        #[arg(long, requires = "backup")]
+        apply: bool,
+        /// Preview the restore without making changes (the default)
+        #[arg(long, requires = "backup", conflicts_with = "apply")]
+        dry_run: bool,
+        #[arg(long, value_enum, default_value_t = SyncFormat::Human)]
+        format: SyncFormat,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -184,6 +232,12 @@ enum Error {
     ManagedSettings(#[from] install::settings::Error),
     #[error(transparent)]
     ManagedApply(#[from] install::settings::ApplyError),
+    #[error(transparent)]
+    UninstallPlan(#[from] lifecycle::UninstallPlanError),
+    #[error(transparent)]
+    UninstallApply(#[from] lifecycle::UninstallApplyError),
+    #[error("{0} finding(s) reported")]
+    LifecycleFindings(usize),
     #[error("could not determine your home directory for sync")]
     NoHome,
     #[error("the sync plan has {0} unsafe destination(s); check the directory paths")]
@@ -225,6 +279,9 @@ impl Error {
             Self::SyncApply(error) => error.exit(),
             Self::ManagedSettings(error) => error.exit(),
             Self::ManagedApply(error) => error.exit(),
+            Self::UninstallPlan(error) => error.exit(),
+            Self::UninstallApply(error) => error.exit(),
+            Self::LifecycleFindings(_) => Exit::Findings,
             Self::Findings(_) | Self::Drift(_) => Exit::Findings,
             Self::Serialize(_) => Exit::Internal,
         }
@@ -262,6 +319,27 @@ fn execute(cli: &Cli) -> Result<(), Error> {
             format,
             ..
         } => return settings(fragment.as_deref(), *apply, *format),
+        Command::Doctor {
+            target: Target::Claude,
+            out,
+            format,
+        } => {
+            let out = out.clone().unwrap_or_else(|| root.join(build::DEFAULT_OUT));
+            return diagnose(root, cli.config.as_deref(), &out, *format);
+        }
+        Command::Uninstall {
+            target: Target::Claude,
+            apply,
+            format,
+            ..
+        } => return uninstall(*apply, *format),
+        Command::Restore {
+            target: Target::Claude,
+            backup,
+            apply,
+            format,
+            ..
+        } => return restore(backup.as_deref(), *apply, *format),
         _ => {}
     }
     // Load first so a broken config is never mistaken for a clean or merely unimplemented run.
@@ -385,9 +463,188 @@ fn execute(cli: &Cli) -> Result<(), Error> {
             let out = out.clone().unwrap_or_else(|| root.join(build::DEFAULT_OUT));
             sync(root, &config, &out, *apply, *format)
         }
-        Command::Rules | Command::Explain { .. } | Command::Settings { .. } => {
-            unreachable!("handled before the config is loaded")
+        Command::Rules
+        | Command::Explain { .. }
+        | Command::Settings { .. }
+        | Command::Doctor { .. }
+        | Command::Uninstall { .. }
+        | Command::Restore { .. } => unreachable!("handled before the config is loaded"),
+    }
+}
+
+fn diagnose(
+    root: &Path,
+    config: Option<&Path>,
+    out: &Path,
+    format: SyncFormat,
+) -> Result<(), Error> {
+    let report = doctor::diagnose(root, config, out, &locations()?);
+    match format {
+        SyncFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+        SyncFormat::Human => {
+            for check in &report.checks {
+                print!("{:<5} {} {}", check.status.label(), check.id, check.summary);
+                if let Some(subject) = &check.subject {
+                    print!(" ({subject})");
+                }
+                println!();
+                if let Some(detail) = &check.detail {
+                    for line in detail.lines() {
+                        println!("      {line}");
+                    }
+                }
+                if let Some(remediation) = check.remediation {
+                    println!("      {remediation}");
+                }
+            }
+            println!(
+                "{} overall, {} healthy, {} missing, {} login, {} check, {} drifted, {} unsupported",
+                report.status.label(),
+                report.summary.healthy,
+                report.summary.missing,
+                report.summary.authentication_required,
+                report.summary.user_action_required,
+                report.summary.drifted,
+                report.summary.unsupported,
+            );
         }
+    }
+    lifecycle_verdict(report.findings())
+}
+
+fn uninstall(apply: bool, format: SyncFormat) -> Result<(), Error> {
+    let plan = lifecycle::uninstall_plan(&locations()?)?;
+    if matches!(format, SyncFormat::Human) {
+        if plan.links().operations().is_empty() && plan.settings().operations.is_empty() {
+            println!("nothing to uninstall");
+        } else {
+            println!(
+                "Uninstall plan for Claude config at {}",
+                plan.links().root().display()
+            );
+            for op in plan.links().operations() {
+                println!("{:?} link {} ({})", op.operation, op.destination, op.reason);
+            }
+            for op in &plan.settings().operations {
+                print!("{:?} {:?} {}", op.operation, op.kind, op.target);
+                if let Some(event) = &op.event {
+                    print!(" [{event}]");
+                }
+                println!(" ({})", op.reason);
+            }
+        }
+    }
+    if !apply {
+        if matches!(format, SyncFormat::Json) {
+            println!("{}", serde_json::to_string_pretty(&plan)?);
+        }
+        return lifecycle_verdict(
+            plan.links().summary().conflict + plan.settings().summary.conflict,
+        );
+    }
+
+    let report = match lifecycle::uninstall_apply(&plan) {
+        Ok(report) => report,
+        Err(error) => {
+            let links = match &error {
+                lifecycle::UninstallApplyError::Links(err) => err.report(),
+                lifecycle::UninstallApplyError::Settings { links, .. } => Some(links.as_ref()),
+            };
+            if let Some(links) = links {
+                eprintln!("{}", serde_json::to_string_pretty(links)?);
+            }
+            return Err(error.into());
+        }
+    };
+    match format {
+        SyncFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+        SyncFormat::Human => {
+            if report.links.ledger != install::LedgerState::Unchanged {
+                println!("Ledger {:?}", report.links.ledger);
+            }
+            if let Some(backup) = &report.settings_backup {
+                println!("Backup {}", backup.display());
+            }
+            if !report.settings_conflicts.is_empty() {
+                println!("Settings changes skipped because of conflicts");
+            }
+        }
+    }
+    lifecycle_verdict(report.link_conflicts.len() + report.settings_conflicts.len())
+}
+
+fn restore(backup: Option<&str>, apply: bool, format: SyncFormat) -> Result<(), Error> {
+    let locations = locations()?;
+    let Some(name) = backup else {
+        let mut backups = lifecycle::restore_backups(&locations)?;
+        backups.sort_unstable_by(|a, b| b.name.cmp(&a.name));
+        match format {
+            SyncFormat::Json => println!("{}", serde_json::to_string_pretty(&backups)?),
+            SyncFormat::Human if backups.is_empty() => println!("No settings backups"),
+            SyncFormat::Human => {
+                for backup in &backups {
+                    println!(
+                        "{}  {} UTC Unix ns  {} bytes  SHA-256 {}",
+                        backup.name, backup.timestamp_utc_ns, backup.size, backup.sha256
+                    );
+                }
+            }
+        }
+        return Ok(());
+    };
+
+    let plan = lifecycle::restore_plan(&locations, name)?;
+    let settings_backup = if apply {
+        lifecycle::restore_apply(&plan)?
+    } else {
+        None
+    };
+    match format {
+        SyncFormat::Json if apply => {
+            #[derive(serde::Serialize)]
+            struct RestoreReport<'a> {
+                #[serde(flatten)]
+                plan: &'a lifecycle::RestorePlan,
+                settings_backup: Option<PathBuf>,
+            }
+            let report = RestoreReport {
+                plan: &plan,
+                settings_backup,
+            };
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        SyncFormat::Json => println!("{}", serde_json::to_string_pretty(&plan)?),
+        SyncFormat::Human => {
+            let action = if apply { "Restored" } else { "Would restore" };
+            println!(
+                "{action} {} (SHA-256 {} -> {})",
+                plan.backup.name, plan.current_sha256, plan.backup.sha256
+            );
+            for (action, records) in [("Keep", &plan.retained), ("Drop", &plan.dropped)] {
+                for record in records {
+                    print!("{action} {:?} {}", record.kind, record.target);
+                    if let Some(event) = &record.event {
+                        print!(" [{event}]");
+                    }
+                    println!();
+                }
+            }
+            if !apply {
+                println!("Apply backs up current settings before restoring.");
+            }
+            if let Some(backup) = settings_backup {
+                println!("Backup {}", backup.display());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn lifecycle_verdict(findings: usize) -> Result<(), Error> {
+    if findings == 0 {
+        Ok(())
+    } else {
+        Err(Error::LifecycleFindings(findings))
     }
 }
 
@@ -477,7 +734,7 @@ fn locations() -> Result<install::Locations, Error> {
 fn settings(fragment: Option<&Path>, apply: bool, format: SyncFormat) -> Result<(), Error> {
     use install::settings;
     let fragment = fragment.map(settings::Fragment::read).transpose()?;
-    let plan = settings::plan(&locations()?, fragment.as_ref())?;
+    let plan = lifecycle::settings_plan(&locations()?, fragment.as_ref())?;
     match format {
         SyncFormat::Json => println!("{}", serde_json::to_string_pretty(&plan)?),
         SyncFormat::Human => {
@@ -506,7 +763,7 @@ fn settings(fragment: Option<&Path>, apply: bool, format: SyncFormat) -> Result<
         .into());
     }
     if apply {
-        let backup = settings::apply(&plan)?;
+        let backup = lifecycle::settings_apply(&plan)?;
         if let (Some(backup), SyncFormat::Human) = (backup, format) {
             println!("Backup {}", backup.display());
         }

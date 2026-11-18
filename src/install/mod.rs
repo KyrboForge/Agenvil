@@ -5,6 +5,7 @@ mod apply;
 mod desired;
 mod fsops;
 mod ledger;
+pub mod lifecycle;
 mod plan;
 pub mod settings;
 

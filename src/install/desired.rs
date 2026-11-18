@@ -6,9 +6,11 @@ use sha2::{Digest, Sha256};
 use super::{Key, Kind, PlanError, ledger::Applied};
 use crate::{build, config::Config, inventory::Inventory, manifest, stage};
 
+#[derive(Default)]
 pub(super) struct Desired {
     pub resources: BTreeMap<Key, Resource>,
-    pub applied: Applied,
+    /// Staging provenance for sync. Uninstall has no staging or desired resources.
+    pub applied: Option<Applied>,
 }
 
 pub(super) struct Resource {
@@ -77,12 +79,12 @@ impl Desired {
             .collect();
         Ok(Self {
             resources,
-            applied: Applied {
+            applied: Some(Applied {
                 kit: config.project.name.clone(),
                 project_root,
                 manifest_sha256,
                 generator,
-            },
+            }),
         })
     }
 }

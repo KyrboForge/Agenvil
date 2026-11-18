@@ -202,7 +202,7 @@ pub struct Plan {
     harness: Harness,
     scope: Scope,
     root: PathBuf,
-    kit: String,
+    kit: Option<String>,
     operations: Vec<Operation>,
     summary: Summary,
     snapshots: Vec<Snapshot>,
@@ -275,7 +275,7 @@ pub fn plan(
     }
     let roots = paths.open()?;
     let ledger = Ledger::read(roots.state.as_ref(), &paths.local, &paths.claude)?;
-    let requested = &desired.applied;
+    let requested = desired.applied.as_ref().expect("staging has provenance");
     if let Some((kit, project_root)) = ledger
         .user
         .as_ref()
@@ -298,14 +298,38 @@ pub fn plan(
             requested_root: requested.project_root.clone(),
         });
     }
-    let actual = Actual::inspect(&paths, &roots, &desired, &ledger)?;
-    let (operations, summary, snapshots) = reconcile(&desired, &ledger, &actual, &paths, &out);
+    reconcile_plan(locations, paths, &roots, desired, ledger, Some(&out))
+}
+
+pub(super) fn uninstall_plan(locations: &Locations) -> Result<Plan, PlanError> {
+    let paths = Resolved::load(locations)?;
+    let roots = paths.open()?;
+    let ledger = Ledger::read(roots.state.as_ref(), &paths.local, &paths.claude)?;
+    reconcile_plan(locations, paths, &roots, Desired::default(), ledger, None)
+}
+
+fn reconcile_plan(
+    locations: &Locations,
+    paths: Resolved,
+    roots: &super::actual::Roots,
+    desired: Desired,
+    ledger: Ledger,
+    out: Option<&Path>,
+) -> Result<Plan, PlanError> {
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let _ = locations;
+    let actual = Actual::inspect(&paths, roots, &desired, &ledger)?;
+    let (operations, summary, snapshots) = reconcile(&desired, &ledger, &actual, &paths, out);
     Ok(Plan {
         schema: 1,
         harness: Harness::Claude,
         scope: Scope::User,
         root: paths.claude.clone(),
-        kit: desired.applied.kit.clone(),
+        kit: desired
+            .applied
+            .as_ref()
+            .or_else(|| ledger.user.as_ref().and_then(|user| user.applied.as_ref()))
+            .map(|applied| applied.kit.clone()),
         operations,
         summary,
         snapshots,
@@ -328,7 +352,7 @@ fn reconcile(
     ledger: &Ledger,
     actual: &Actual,
     paths: &Resolved,
-    out: &Path,
+    out: Option<&Path>,
 ) -> (Vec<Operation>, Summary, Vec<Snapshot>) {
     use OperationKind::{Conflict, Create, Noop, Remove, Update};
     use ReconcileReason as Why;
@@ -402,7 +426,9 @@ fn reconcile(
             desired.resources.get(key).map(|resource| {
                 (
                     Layer::Team,
-                    out.join(".claude").join(key.destination()),
+                    out.expect("team resource has staging")
+                        .join(".claude")
+                        .join(key.destination()),
                     key.snapshot_path(&paths.local, &resource.digest),
                 )
             })

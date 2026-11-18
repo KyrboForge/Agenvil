@@ -216,8 +216,12 @@ impl Actual {
         desired: &Desired,
         ledger: &Ledger,
     ) -> Result<Self, PlanError> {
-        let (private, ignored) = private_layer(roots.local.as_ref())
-            .map_err(|err| PlanError::inspect(&paths.local, err))?;
+        let (private, ignored) = if desired.applied.is_some() {
+            private_layer(roots.local.as_ref())
+                .map_err(|err| PlanError::inspect(&paths.local, err))?
+        } else {
+            (BTreeSet::new(), Vec::new())
+        };
         let entries: BTreeMap<_, _> = ledger.entries().map(|entry| (entry.key(), entry)).collect();
         let keys: BTreeSet<_> = desired
             .resources
@@ -280,7 +284,8 @@ impl Actual {
                 let identity = node_ids.get(key).copied();
                 #[cfg(windows)]
                 let identity = None;
-                if let Observed::Symlink { target } = &observed
+                if desired.applied.is_some()
+                    && let Observed::Symlink { target } = &observed
                     && entries
                         .get(key)
                         .is_some_and(|entry| entry.owns(target, identity))

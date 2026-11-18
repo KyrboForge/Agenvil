@@ -10,7 +10,8 @@ organizational: a user can always edit or remove what it wrote. The command need
 ```sh
 agenvil settings --target claude --fragment managed.json            # dry run (the default)
 agenvil settings --target claude --fragment managed.json --apply
-agenvil settings --target claude --remove [--apply]                 # uninstall what is recorded
+agenvil settings --target claude --remove                          # preview settings removal
+agenvil settings --target claude --remove --apply
 agenvil settings --target claude --remove --format json             # JSON plan
 ```
 
@@ -110,10 +111,11 @@ and the digest of `managed.json` still match the plan. It then makes these chang
    back and apply fails.
 4. It publishes the settled records to `managed.json`.
 
-Concurrent writers are handled best effort, since pathname races cannot be fully excluded, but
-Agenvil only ever deletes content whose digest it wrote. When putting a displaced generation back
-would swap away an even newer save, or the swap fails, the displaced one is kept as
-`.tmp-agenvil-settings-*` beside `settings.json`, and the error names it.
+When recovery detects a concurrent edit, it parks and checks the live file, then
+uses a no-replace rename to put the right generation back. If another save takes
+the live name, Agenvil preserves the parked content in `.tmp-agenvil-settings-*`
+files beside `settings.json` and names them in the error. An interruption during
+recovery can leave the live path vacant and both generations in temporary files.
 
 If publishing fails before the new content is visible, the earlier steps are undone. Once
 `settings.json` is visible, a later failure (for example a failed directory sync) keeps the journal
@@ -124,8 +126,8 @@ it is still Agenvil's write, otherwise it is renamed back, or kept aside and nam
 If a run is interrupted, the next plan settles the journal from whichever side `settings.json`
 matches. If it matches neither side, planning fails rather than guess.
 
-The library's `restore(locations, backup_name)` puts a named backup back, but only while
-`settings.json` is still Agenvil's last write. The current content is backed up first.
+For CLI backup listing, restore and recovery, see [backups and restore](lifecycle.md#backups-and-restore).
+For removal of recorded links and settings together, see [uninstall](lifecycle.md#uninstall).
 
 Exit codes: 0 on success, 1 for conflicts, a busy lock, or files that changed since planning, and
 2 for an invalid fragment or settings file, unsafe paths and other usage errors. Windows plans
@@ -136,7 +138,5 @@ read-only; apply fails closed.
 - Wire fragments from kit sources instead of a file passed on the command line.
 - An RTK provenance hook is just another fragment hook (for example `rtk-pretooluse`); no adapter
   exists yet.
-- A CLI for `restore`, and uninstall for symlinks managed by sync.
-- `restore` leaves `managed.json` as is, so the next install reports the restored file as a user edit.
 - Unmanaged numbers beyond 64-bit range or in exponent form are re-encoded when the file is
   rewritten (serde_json without `arbitrary_precision`).

@@ -35,6 +35,9 @@ For existing TAK-style configurations, see [migration guidance](docs/compatibili
 | `agenvil build --target claude [--out DIR]` | writes `.generated/claude/` | build a Claude-native staging tree from the sources; never installs, never touches `~/.claude` ([`docs/build.md`](docs/build.md)) |
 | `agenvil sync --target claude [--dry-run\|--apply] [--out DIR] [--format human\|json]` | dry run unless `--apply`, offline | reconcile user-level Claude agents, skills and rules from approved staging and the private layer ([`docs/managed-install.md`](docs/managed-install.md)) |
 | `agenvil settings --target claude (--fragment FILE\|--remove) [--dry-run\|--apply] [--format human\|json]` | dry run unless `--apply`, offline | merge managed values and hooks into the user-level `settings.json`, with ownership, backups and conflicts ([`docs/managed-settings.md`](docs/managed-settings.md)) |
+| `agenvil doctor --target claude [--out DIR] [--format human\|json]` | read-only, offline | diagnose Claude install, settings and prerequisites ([lifecycle guide](docs/lifecycle.md#doctor)) |
+| `agenvil uninstall --target claude [--dry-run\|--apply] [--format human\|json]` | dry run unless `--apply`, offline | detach recorded Claude links and settings ([lifecycle guide](docs/lifecycle.md#uninstall)) |
+| `agenvil restore --target claude (--list\|--backup NAME [--dry-run\|--apply]) [--format human\|json]` | read-only unless restoring with `--apply` | list or preview a settings backup, or apply it with `--apply` ([lifecycle guide](docs/lifecycle.md#backups-and-restore)) |
 
 `--root <DIR>` selects the project root; the default is the current directory. The config file is
 `<root>/agenvil.toml` unless `--config <FILE>` overrides it (no search of parent directories). It must be a regular file of at
@@ -46,7 +49,7 @@ outside the root.
 | Code | Meaning |
 | --- | --- |
 | 0 | success |
-| 1 | policy findings at or above `--fail-on` (`check`), sources `build` cannot turn into valid output, or drift (`build --check`) |
+| 1 | policy findings at or above `--fail-on` (`check`), sources `build` cannot turn into valid output, drift (`build --check`), or lifecycle findings (see [lifecycle guide](docs/lifecycle.md)) |
 | 2 | usage or configuration error, including unknown rule IDs, severities and policy keys, a disabled target, an unsafe `--out` or an unsafe generated tree (symlink, escaping manifest path) |
 | 3 | internal error (including panics) |
 | 4 | unable to verify: an explicitly selected rule that is not implemented yet, or an inventory that is incomplete because of [problems](#problems); wins over `1` |
@@ -186,8 +189,9 @@ skills and rules it would link, update or remove. Pass `--dry-run` to preview ex
 `--apply` to install the plan. Sync tracks
 individual links in an ownership ledger and preserves user-owned entries. Installed links belong
 to the checkout that applied them; sync from another checkout is refused even under the same
-`[project].name`. See
-[`docs/managed-install.md`](docs/managed-install.md) for paths, private overrides and recovery.
+`[project].name`. Sync does not touch settings. See [managed install](docs/managed-install.md)
+for paths, private overrides and recovery, and the [Claude lifecycle guide](docs/lifecycle.md)
+for doctor, uninstall and settings restore.
 
 ## `agenvil check`
 

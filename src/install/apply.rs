@@ -108,12 +108,17 @@ pub fn apply(plan: &Plan) -> Result<ApplyReport, ApplyError> {
             count: plan.summary().conflict,
         });
     }
+    apply_reconciled(plan)
+}
+
+pub(super) fn apply_reconciled(plan: &Plan) -> Result<ApplyReport, ApplyError> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         native::apply_with(plan, &mut |_| Ok(()))
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
+        let _ = plan;
         super::fsops::probe().map_err(|source| ApplyError::CapabilityMissing {
             source,
             report: None,
@@ -124,7 +129,7 @@ pub fn apply(plan: &Plan) -> Result<ApplyReport, ApplyError> {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod native {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::ffi::OsStr;
     use std::path::Path;
 
@@ -139,6 +144,13 @@ mod native {
     use crate::install::{Key, Kind, Layer};
     use crate::{manifest, stage::pinned::Root};
 
+    fn changes_link(operation: OperationKind) -> bool {
+        matches!(
+            operation,
+            OperationKind::Create | OperationKind::Update | OperationKind::Remove
+        )
+    }
+
     pub(in crate::install) fn apply_with(
         plan: &Plan,
         inject: &mut dyn FnMut(Point) -> io::Result<()>,
@@ -152,7 +164,7 @@ mod native {
                 .iter()
                 .map(|op| OperationReport {
                     destination: op.destination.clone(),
-                    status: if op.operation == OperationKind::Noop {
+                    status: if !changes_link(op.operation) {
                         ApplyStatus::Unchanged
                     } else {
                         ApplyStatus::NotRun
@@ -168,7 +180,7 @@ mod native {
             .iter()
             .map(|op| {
                 old_target(op)
-                    .filter(|_| op.operation != OperationKind::Noop)
+                    .filter(|_| changes_link(op.operation))
                     .map(|target| Quarantine {
                         name: temp_name("retired-link"),
                         target: target.to_owned(),
@@ -184,10 +196,14 @@ mod native {
         let ledger_update = plan
             .operations()
             .iter()
-            .any(|op| op.operation != OperationKind::Noop)
-            || plan.ledger.user.as_ref().is_none_or(|old| {
-                old.applied != final_user.applied || old.entries != final_user.entries
-            });
+            .any(|op| changes_link(op.operation))
+            || plan
+                .ledger
+                .user
+                .as_ref()
+                .map_or(final_user.applied.is_some(), |old| {
+                    old.applied != final_user.applied || old.entries != final_user.entries
+                });
         if !restore && !ledger_update {
             return Ok(report);
         }
@@ -342,6 +358,11 @@ mod native {
             return Err(failure(ApplyStep::Commit, err.source, report));
         }
         report.ledger = LedgerState::Committed;
+        if plan.desired.applied.is_none()
+            && let Err(err) = links.discard_retired(plan, &mut fs, &journal, &final_user)
+        {
+            return Err(failure(ApplyStep::Commit, err, report));
+        }
         Ok(report)
     }
 
@@ -406,7 +427,7 @@ mod native {
         };
         let mut committed = User {
             root: journal.root.clone(),
-            applied: Some(plan.desired.applied.clone()),
+            applied: plan.desired.applied.clone(),
             entries: Vec::new(),
         };
         for (op, retirement) in plan.operations().iter().zip(retirements) {
@@ -417,15 +438,19 @@ mod native {
             quarantines.extend(retirement.clone());
             let wanted = op.source.as_ref().map(|_| {
                 let layer = op.layer.expect("desired entry has a layer");
+                let provenance = plan
+                    .desired
+                    .applied
+                    .as_ref()
+                    .filter(|_| layer == Layer::Team);
                 Entry {
                     kind: op.kind,
                     name: op.name.clone(),
                     destination: op.destination.clone(),
                     link_target: op.link_target.clone().expect("desired entry has a target"),
                     layer,
-                    kit: (layer == Layer::Team).then(|| plan.desired.applied.kit.clone()),
-                    project_root: (layer == Layer::Team)
-                        .then(|| plan.desired.applied.project_root.clone()),
+                    kit: provenance.map(|applied| applied.kit.clone()),
+                    project_root: provenance.map(|applied| applied.project_root.clone()),
                     resource_sha256: digest_for(op, &plan.paths.local),
                     // A created or updated link gets its identity once apply has made it.
                     identity: (op.operation == Noop)
@@ -472,9 +497,17 @@ mod native {
                     Some(entry)
                 }
                 Noop => existing.cloned(),
-                Conflict => unreachable!("conflict plans have already been refused"),
+                Conflict => {
+                    committed.entries.extend(existing.cloned());
+                    existing.cloned()
+                }
             };
             journal.entries.extend(pending);
+        }
+        if committed.entries.is_empty() {
+            committed.applied = None;
+        } else if committed.applied.is_none() {
+            committed.applied = journal.applied.clone();
         }
         (journal, committed)
     }
@@ -529,7 +562,7 @@ mod native {
             report: &mut ApplyReport,
         ) -> io::Result<()> {
             for (index, op) in plan.operations().iter().enumerate() {
-                if op.operation == OperationKind::Noop {
+                if !changes_link(op.operation) {
                     continue;
                 }
                 if let Err(err) = self.execute(plan, index, fs) {
@@ -606,14 +639,16 @@ mod native {
                     "managed directory was replaced during apply",
                 ));
             }
-            if private_layer(roots.local.as_ref())?.0 != plan.actual.private {
+            if plan.desired.applied.is_some()
+                && private_layer(roots.local.as_ref())?.0 != plan.actual.private
+            {
                 return Err(io::Error::other("private resources changed during apply"));
             }
             for kind in Kind::ALL {
                 let mut operations = plan
                     .operations()
                     .iter()
-                    .filter(|op| op.kind == kind)
+                    .filter(|op| op.kind == kind && op.operation != OperationKind::Conflict)
                     .peekable();
                 if operations.peek().is_none() {
                     continue;
@@ -646,6 +681,44 @@ mod native {
                         }
                     }
                 }
+            }
+        }
+
+        fn discard_retired(
+            &self,
+            plan: &Plan,
+            fs: &mut Fs<'_>,
+            journal: &User,
+            committed: &User,
+        ) -> io::Result<()> {
+            let kept: BTreeSet<_> = committed.entries.iter().map(Entry::key).collect();
+            let mut errors = Vec::new();
+            for entry in journal
+                .entries
+                .iter()
+                .filter(|entry| !kept.contains(&entry.key()))
+            {
+                let Some(pending) = &entry.pending else {
+                    continue;
+                };
+                for item in &pending.quarantines {
+                    let result =
+                        child(self.root.as_ref(), entry.kind.directory()).and_then(|parent| {
+                            match parent {
+                                Some(parent) => fs.discard_retired(&parent, item),
+                                None => Ok(()),
+                            }
+                        });
+                    if let Err(err) = result {
+                        let path = plan.root().join(entry.kind.directory()).join(&item.name);
+                        errors.push(format!("inspect {} ({err})", path.display()));
+                    }
+                }
+            }
+            if errors.is_empty() {
+                Ok(())
+            } else {
+                Err(io::Error::other(errors.join(", ")))
             }
         }
 

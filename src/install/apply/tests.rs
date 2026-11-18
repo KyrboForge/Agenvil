@@ -740,3 +740,66 @@ fn interrupted_retirement_of_verified_link_converges_on_retry() {
     assert_eq!(fs::read_link(quarantine).unwrap(), target);
     assert_eq!(p.plan().summary().noop, 1);
 }
+
+#[test]
+fn interrupted_uninstall_recovers_on_rerun() {
+    use crate::install::lifecycle::{pending_operations, uninstall_apply, uninstall_plan};
+
+    let p = Fixture::new();
+    apply(&p.plan()).unwrap();
+    let uninstall = uninstall_plan(&p.locations).unwrap();
+    let failure = apply_with(uninstall.links(), &mut |point| {
+        if matches!(point, Point::Commit | Point::Rollback) {
+            Err(injected())
+        } else {
+            Ok(())
+        }
+    })
+    .unwrap_err();
+    assert_eq!(failure.report().unwrap().ledger, LedgerState::Pending);
+    let pending = pending_operations(&p.locations).unwrap();
+    assert_eq!(pending.links.len(), 2);
+    assert!(!pending.settings);
+    let retry = uninstall_plan(&p.locations).unwrap();
+    uninstall_apply(&retry).unwrap();
+    assert!(pending_operations(&p.locations).unwrap().is_empty());
+    assert!(p.user().is_null());
+    assert!(fs::symlink_metadata(p.destination("a")).is_err());
+    assert!(fs::symlink_metadata(p.destination("z")).is_err());
+    assert_eq!(
+        fs::read_dir(p.destination("a").parent().unwrap())
+            .unwrap()
+            .count(),
+        1
+    );
+    p.user_file_survives();
+}
+
+#[test]
+fn uninstall_preserves_and_reports_a_replaced_retirement() {
+    use crate::install::lifecycle::uninstall_plan;
+
+    let p = Fixture::new();
+    apply(&p.plan()).unwrap();
+    let plan = uninstall_plan(&p.locations).unwrap();
+    let mut quarantine = None;
+    let failure = apply_with(plan.links(), &mut |point| {
+        if point == Point::Commit {
+            let user = p.user();
+            let name = user["entries"][0]["pending"]["quarantines"][0]["name"]
+                .as_str()
+                .unwrap();
+            let path = p.destination("a").with_file_name(name);
+            fs::remove_file(&path)?;
+            fs::write(&path, "concurrent user file")?;
+            quarantine = Some(path);
+        }
+        Ok(())
+    })
+    .unwrap_err();
+
+    let path = quarantine.unwrap();
+    assert!(failure.to_string().contains(path.to_str().unwrap()));
+    assert_eq!(failure.report().unwrap().ledger, LedgerState::Committed);
+    assert_eq!(fs::read_to_string(path).unwrap(), "concurrent user file");
+}

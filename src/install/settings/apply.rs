@@ -4,7 +4,6 @@ use std::path::PathBuf;
 use serde::Serialize;
 
 use super::{Error, Plan};
-use crate::install::Locations;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -26,7 +25,7 @@ pub enum ApplyError {
     Changed { detail: String },
     #[error("ownership.lock is busy; retry after the other run finishes")]
     Locked,
-    #[error("`{0}` is not a settings backup Agenvil wrote")]
+    #[error("`{0}` is not a usable settings backup; check its name, file, and digest")]
     InvalidBackup(String),
     #[error(transparent)]
     Plan(#[from] Error),
@@ -67,20 +66,6 @@ pub fn apply(plan: &Plan) -> Result<Option<PathBuf>, ApplyError> {
     }
 }
 
-/// Restores backup `name` over `settings.json`, only while that file is still Agenvil's last
-/// write. The current content is backed up first; `managed.json` is left as is.
-pub fn restore(locations: &Locations, name: &str) -> Result<Option<PathBuf>, ApplyError> {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    {
-        native::restore(locations, name)
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        let _ = (locations, name);
-        Err(ApplyError::Unsupported)
-    }
-}
-
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) mod native {
     use std::io::{self, Read};
@@ -89,10 +74,9 @@ pub(super) mod native {
     use rustix::fs::RenameFlags;
 
     use super::{ApplyError, Step};
-    use crate::install::Locations;
     use crate::install::actual::Resolved;
     use crate::install::fsops::{Fs, rename_new, rename_with, temp_name, write_file};
-    use crate::install::settings::{MAX_BYTES, Plan, SETTINGS, backup, plan, read, seen, state};
+    use crate::install::settings::{MAX_BYTES, Plan, SETTINGS, backup, read, seen, state};
     use crate::manifest;
     use crate::stage::pinned::Root;
 
@@ -104,13 +88,42 @@ pub(super) mod native {
     /// A failed publication, and whether the new generation became visible before it failed.
     struct PublishError {
         visible: bool,
+        changed: bool,
         source: io::Error,
+    }
+
+    impl PublishError {
+        fn changed(visible: bool, detail: String) -> Self {
+            Self {
+                visible,
+                changed: true,
+                source: io::Error::other(detail),
+            }
+        }
+
+        fn report(self, step: Step, outcome: String) -> ApplyError {
+            if self.changed {
+                let detail = match outcome.as_str() {
+                    UNCHANGED => self.source.to_string(),
+                    JOURNALED => format!("{}. The next plan settles managed.json", self.source),
+                    _ => format!("{}. {outcome}", self.source),
+                };
+                ApplyError::Changed { detail }
+            } else {
+                ApplyError::Failed {
+                    step,
+                    source: self.source,
+                    outcome,
+                }
+            }
+        }
     }
 
     impl From<io::Error> for PublishError {
         fn from(source: io::Error) -> Self {
             Self {
                 visible: false,
+                changed: false,
                 source,
             }
         }
@@ -131,11 +144,6 @@ pub(super) mod native {
                 source,
                 outcome,
             }
-        };
-        let failed = |step, source, outcome: &str| ApplyError::Failed {
-            step,
-            source,
-            outcome: outcome.to_owned(),
         };
         let mut quiet = |_| Ok(());
         let mut fs = Fs(&mut quiet);
@@ -164,7 +172,7 @@ pub(super) mod native {
             )
             .map_err(|err| {
                 let outcome = if err.visible { COMMITTED } else { UNCHANGED };
-                failed(at, err.source, outcome)
+                err.report(at, outcome.to_owned())
             })?;
             return Ok(None);
         };
@@ -190,7 +198,7 @@ pub(super) mod native {
             )
             .map_err(|err| {
                 let outcome = if err.visible { JOURNALED } else { UNCHANGED };
-                failed(at, err.source, outcome)
+                err.report(at, outcome.to_owned())
             })?;
             state_digest = Some(manifest::sha256(journal));
         }
@@ -215,7 +223,7 @@ pub(super) mod native {
         );
         match published {
             // The new settings are visible: the journal stays so the next plan settles from it.
-            Err(err) if err.visible => return Err(failed(Step::Settings, err.source, WRITTEN)),
+            Err(err) if err.visible => return Err(err.report(Step::Settings, WRITTEN.to_owned())),
             Err(err) => {
                 // The journal never took effect; put the previous records back so they stay valid.
                 let journal = state_digest.as_deref();
@@ -233,7 +241,7 @@ pub(super) mod native {
                 } else {
                     JOURNALED
                 };
-                return Err(failed(Step::Settings, err.source, outcome));
+                return Err(err.report(Step::Settings, outcome.to_owned()));
             }
             Ok(()) => {}
         }
@@ -249,7 +257,9 @@ pub(super) mod native {
             );
             match committed {
                 // The records are settled, so settings.json must not be rolled back under them.
-                Err(err) if err.visible => return Err(failed(Step::Commit, err.source, COMMITTED)),
+                Err(err) if err.visible => {
+                    return Err(err.report(Step::Commit, COMMITTED.to_owned()));
+                }
                 Err(err) => {
                     let written = manifest::sha256(after);
                     // Undo only our own write; a newer user edit is never replaced.
@@ -269,47 +279,12 @@ pub(super) mod native {
                             "settings.json was not rolled back ({why}); the next plan settles managed.json"
                         ),
                     };
-                    return Err(ApplyError::Failed {
-                        step: Step::Commit,
-                        source: err.source,
-                        outcome,
-                    });
+                    return Err(err.report(Step::Commit, outcome));
                 }
                 Ok(()) => {}
             }
         }
         Ok(backup)
-    }
-
-    pub(super) fn restore(
-        locations: &Locations,
-        name: &str,
-    ) -> Result<Option<PathBuf>, ApplyError> {
-        // A removal plan reads and checks everything a restore needs; only its writes are replaced.
-        let mut plan = plan(locations, None)?;
-        let invalid = || ApplyError::InvalidBackup(name.to_owned());
-        if !backup::is_name(name) {
-            return Err(invalid());
-        }
-        let current = plan.settings.as_ref().map(|(_, seen)| seen.digest.clone());
-        if current.is_none() || current != plan.last_write {
-            return Err(ApplyError::Changed {
-                detail: "settings.json is not Agenvil's last write".to_owned(),
-            });
-        }
-        let state = Root::open(&plan.paths.local.join("state"))
-            .map_err(|_| invalid())?
-            .ok_or_else(invalid)?;
-        let bytes = backup::dir(&state)
-            .ok()
-            .flatten()
-            .and_then(|dir| read(Some(&dir), name).ok().flatten())
-            .ok_or_else(invalid)?
-            .0;
-        plan.settings_after = Some(bytes);
-        plan.state_after = None;
-        plan.journal = None;
-        apply_with(&plan, &mut |_| Ok(()))
     }
 
     /// Rechecks under the lock that roots, `settings.json` and `managed.json` are what was planned.
@@ -364,7 +339,7 @@ pub(super) mod native {
     /// Publishes `bytes` as `name` atomically: no-replace when it is new, an exchange otherwise.
     /// A displaced generation that is not `expected` belongs to a concurrent writer: it is put
     /// back, or kept beside `name`, but never deleted. `inject` is a fault point before the
-    /// publication and once it is visible.
+    /// publication, once it is visible, and before parking the live generation for recovery.
     fn publish(
         dir: &Root,
         name: &str,
@@ -373,21 +348,45 @@ pub(super) mod native {
         mode: u32,
         inject: &mut dyn FnMut() -> io::Result<()>,
     ) -> Result<(), PublishError> {
-        if named(dir, name)?.as_deref() != expected {
-            return Err(io::Error::other(format!("{name} changed before publication")).into());
+        match named(dir, name) {
+            Ok(digest) if digest.as_deref() == expected => {}
+            Ok(_) => {
+                return Err(PublishError::changed(
+                    false,
+                    format!("{name} changed before publication"),
+                ));
+            }
+            Err(err) => {
+                return Err(PublishError::changed(
+                    false,
+                    format!("cannot verify {name} before publication ({err})"),
+                ));
+            }
         }
         let temp = temp_name("settings");
         write_file(dir, &temp, bytes, mode)?;
-        let published = inject().and_then(|()| match expected {
-            None => rename_new(dir, &temp, name),
-            Some(_) => rename_with(dir, &temp, name, RenameFlags::EXCHANGE),
+        let published = inject().map_err(PublishError::from).and_then(|()| {
+            let result = match expected {
+                None => rename_new(dir, &temp, name),
+                Some(_) => rename_with(dir, &temp, name, RenameFlags::EXCHANGE),
+            };
+            result.map_err(|err| match (expected, err.kind()) {
+                (None, io::ErrorKind::AlreadyExists) | (Some(_), io::ErrorKind::NotFound) => {
+                    PublishError::changed(
+                        false,
+                        format!("{name} changed before publication ({err})"),
+                    )
+                }
+                _ => err.into(),
+            })
         });
         if let Err(err) = published {
             dir.remove(&temp, |_| Ok(true))?;
-            return Err(err.into());
+            return Err(err);
         }
         let visible = |source| PublishError {
             visible: true,
+            changed: false,
             source,
         };
         // Reported only after the displaced generation is checked, like a failed sync.
@@ -395,7 +394,7 @@ pub(super) mod native {
         if let Some(expected) = expected {
             // Anything unreadable, a symlink or a special file fails the check too.
             if named(dir, &temp).ok().flatten().as_deref() != Some(expected) {
-                return Err(recover(dir, name, &temp, &manifest::sha256(bytes)));
+                return Err(recover(dir, name, &temp, &manifest::sha256(bytes), inject));
             }
             dir.remove(&temp, |file| Ok(digest(file)? == expected))
                 .map_err(visible)?;
@@ -405,27 +404,51 @@ pub(super) mod native {
         Ok(())
     }
 
-    /// Undoes an exchange that displaced a concurrent generation now held at `temp`. Best effort:
-    /// pathname races remain, but only `ours` is ever deleted.
-    fn recover(dir: &Root, name: &str, temp: &str, ours: &str) -> PublishError {
-        let error = |visible, detail: String| PublishError {
-            visible,
-            source: io::Error::other(format!("{name} changed during publication; {detail}")),
+    /// Undoes an exchange that displaced a concurrent generation now held at `temp`.
+    /// Park and verify the live generation before putting either file back without replacement.
+    fn recover(
+        dir: &Root,
+        name: &str,
+        temp: &str,
+        ours: &str,
+        inject: &mut dyn FnMut() -> io::Result<()>,
+    ) -> PublishError {
+        let error = |visible, detail| {
+            PublishError::changed(
+                visible,
+                format!("{name} changed during publication; {detail}"),
+            )
         };
         let kept = format!("the displaced content was kept as {temp} beside {name}");
-        // A newer writer already replaced ours, so swapping back would hide that generation.
-        if named(dir, name).ok().flatten().as_deref() != Some(ours) {
+        let is_ours = |leaf| named(dir, leaf).ok().flatten().as_deref() == Some(ours);
+        if !is_ours(name) {
             return error(false, kept);
         }
-        if let Err(err) = rename_with(dir, temp, name, RenameFlags::EXCHANGE) {
-            return error(true, format!("{kept} ({err})"));
+        let aside = temp_name("settings");
+        if let Err(err) = inject().and_then(|()| rename_new(dir, name, &aside)) {
+            return error(is_ours(name), format!("{kept} ({err})"));
         }
-        // `temp` holds ours unless yet another writer got in between; that one is kept.
-        match dir.remove(temp, |file| Ok(digest(file)? == ours)) {
+        if !is_ours(&aside) {
+            let detail = match rename_new(dir, &aside, name) {
+                Ok(()) => kept,
+                Err(err) => format!("{kept}; the newer content was kept as {aside} ({err})"),
+            };
+            return error(false, detail);
+        }
+        if let Err(err) = rename_new(dir, temp, name) {
+            return match rename_new(dir, &aside, name) {
+                Ok(()) => error(true, format!("{kept} ({err})")),
+                Err(put_back) => error(
+                    false,
+                    format!("{kept} ({err}); inspect {aside} ({put_back})"),
+                ),
+            };
+        }
+        match dir.remove(&aside, |file| Ok(digest(file)? == ours)) {
             Ok(true) => error(false, "the concurrent content was put back".to_owned()),
             _ => error(
                 false,
-                format!("the concurrent content was put back and {temp} beside it was kept"),
+                format!("the concurrent content was put back; inspect {aside} beside it"),
             ),
         }
     }

@@ -712,11 +712,15 @@ fn backups_are_private_bounded_and_restorable() {
     ));
     restore(&home.locations, newest).unwrap();
     assert_eq!(home.json(), json!({"n": 10}));
-    // The restored file is no longer Agenvil's last write, so a second restore is refused.
-    assert!(matches!(
-        restore(&home.locations, newest),
-        Err(ApplyError::Changed { .. })
-    ));
+    let detach = home.plan(None);
+    assert!(!detach.has_conflicts());
+    assert!(detach.operations.is_empty());
+    let state: Value = serde_json::from_slice(&home.state().unwrap()).unwrap();
+    assert_eq!(
+        state["harnesses"]["claude"]["user"]["last_write"],
+        crate::manifest::sha256(&home.bytes())
+    );
+    restore(&home.locations, newest).unwrap();
 }
 
 #[test]
@@ -1061,4 +1065,98 @@ fn failures_after_a_visible_write_keep_what_was_published() {
     let next = home.plan(Some(&basic()));
     assert_eq!(next.summary.noop, 4);
     assert_eq!(next.files.state.action, FileAction::Unchanged);
+}
+
+#[test]
+fn restore_reports_a_prepublication_edit_as_findings() {
+    let home = Home::new();
+    home.write("{}");
+    home.install(&basic());
+    let plan = restore_plan(&home.locations, &home.backups()[0]).unwrap();
+    let mut journals = 0;
+
+    let error = apply_with(&plan.transaction, &mut |step| {
+        if step == Step::Journal {
+            journals += 1;
+            if journals == 2 {
+                home.write(r#"{"edited":true}"#);
+            }
+        }
+        Ok(())
+    })
+    .unwrap_err();
+
+    assert!(matches!(error, ApplyError::Changed { .. }), "{error}");
+    assert_eq!(error.exit(), crate::diagnostics::Exit::Findings);
+    assert_eq!(home.json(), json!({"edited": true}));
+}
+
+#[test]
+fn restore_recovers_an_edit_parked_after_the_live_check() {
+    let home = Home::new();
+    home.write("{}");
+    home.install(&basic());
+    let plan = restore_plan(&home.locations, &home.backups()[0]).unwrap();
+    let mut settings_calls = 0;
+
+    apply_with(&plan.transaction, &mut |step| {
+        if step == Step::Settings {
+            settings_calls += 1;
+            match settings_calls {
+                1 => home.write(r#"{"older":true}"#),
+                3 => {
+                    let editor_save = home.locations.claude_root.join("editor-save");
+                    fs::write(&editor_save, r#"{"newer":true}"#)?;
+                    fs::rename(editor_save, home.settings())?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    })
+    .unwrap_err();
+
+    assert_eq!(settings_calls, 3);
+    assert_eq!(home.json(), json!({"newer": true}));
+    assert_eq!(home.kept(), [br#"{"older":true}"#.to_vec()]);
+}
+
+#[test]
+fn interrupted_restore_keeps_matching_hook_records_and_settles_on_retry() {
+    use crate::install::lifecycle::pending_operations;
+
+    let home = Home::new();
+    home.write("{}");
+    let with_model = |model| {
+        fragment(json!({
+            "schema": 1,
+            "values": {"/model": model},
+            "hooks": [hook("guard", "PreToolUse", "guard.sh")]
+        }))
+    };
+    let first = with_model("opus");
+    home.install(&first);
+    let backup = apply(&home.plan(Some(&with_model("sonnet"))))
+        .unwrap()
+        .unwrap();
+    let name = backup.file_name().unwrap().to_str().unwrap();
+    let restore = restore_plan(&home.locations, name).unwrap();
+    assert_eq!(restore.retained.len(), 1);
+    assert_eq!(restore.retained[0].kind, EntryKind::Hook);
+    assert!(matches!(
+        apply_with(&restore.transaction, &mut fail_at(Step::Settings, 2)),
+        Err(ApplyError::Failed {
+            step: Step::Settings,
+            ..
+        })
+    ));
+    assert_eq!(home.bytes(), fs::read(&backup).unwrap());
+    assert!(pending_operations(&home.locations).unwrap().settings);
+
+    let retry = restore_plan(&home.locations, name).unwrap();
+    assert_eq!(retry.retained, restore.retained);
+    assert!(retry.dropped.is_empty());
+    restore_apply(&retry).unwrap();
+    assert!(pending_operations(&home.locations).unwrap().is_empty());
+    assert!(!home.plan(Some(&first)).has_conflicts());
 }
