@@ -126,7 +126,7 @@ pub fn apply(plan: &Plan) -> Result<ApplyReport, ApplyError> {
 mod native {
     use std::collections::BTreeMap;
     use std::ffi::OsStr;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     use super::*;
     use crate::install::actual::{
@@ -176,7 +176,7 @@ mod native {
                     })
             })
             .collect();
-        let (journal, final_user) = users(plan, &retirements);
+        let (journal, mut final_user) = users(plan, &retirements);
         let restore = plan
             .snapshots()
             .iter()
@@ -231,11 +231,7 @@ mod native {
         }
 
         let old = plan.ledger.digest.as_deref();
-        let (journal_bytes, final_bytes) = match plan
-            .ledger
-            .encoded(&journal)
-            .and_then(|journal| Ok((journal, plan.ledger.encoded(&final_user)?)))
-        {
+        let journal_bytes = match plan.ledger.encoded(&journal) {
             Ok(bytes) => bytes,
             Err(err) => return Err(failure(ApplyStep::Journal, err, report)),
         };
@@ -287,6 +283,22 @@ mod native {
             );
             return Err(failure(ApplyStep::Commit, err, report));
         }
+        links.record_identities(plan, &mut final_user);
+        let final_bytes = match plan.ledger.encoded(&final_user) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                recover(
+                    plan,
+                    &state,
+                    &mut fs,
+                    &mut links,
+                    &journal,
+                    &journal_digest,
+                    &mut report,
+                );
+                return Err(failure(ApplyStep::Commit, err, report));
+            }
+        };
         let final_digest = manifest::sha256(&final_bytes);
         if let Err(err) = fs.persist(
             &state,
@@ -412,7 +424,13 @@ mod native {
                     link_target: op.link_target.clone().expect("desired entry has a target"),
                     layer,
                     kit: (layer == Layer::Team).then(|| plan.desired.applied.kit.clone()),
+                    project_root: (layer == Layer::Team)
+                        .then(|| plan.desired.applied.project_root.clone()),
                     resource_sha256: digest_for(op, &plan.paths.local),
+                    // A created or updated link gets its identity once apply has made it.
+                    identity: (op.operation == Noop)
+                        .then(|| plan.actual.node_ids.get(&op.key()).copied())
+                        .flatten(),
                     pending: None,
                 }
             });
@@ -500,7 +518,7 @@ mod native {
 
     enum Undo {
         Delete(Quarantine),
-        Restore(PathBuf),
+        Restore(Quarantine),
     }
 
     impl Links<'_> {
@@ -557,7 +575,7 @@ mod native {
                     Point::Replace
                 };
                 fs.retire(parent, &leaf, item, point)?;
-                self.undo.push((index, Undo::Restore(item.target.clone())));
+                self.undo.push((index, Undo::Restore(item.clone())));
             }
             if let Some(wanted) = op.link_target.as_deref().filter(|_| op.source.is_some()) {
                 fs.link(parent, &leaf, wanted, Point::Create)?;
@@ -618,6 +636,19 @@ mod native {
             verify_snapshots(plan, state)
         }
 
+        fn record_identities(&self, plan: &Plan, user: &mut User) {
+            for (index, undo) in &self.undo {
+                if let Undo::Delete(item) = undo {
+                    let destination = &plan.operations()[*index].destination;
+                    for entry in &mut user.entries {
+                        if entry.destination == *destination {
+                            entry.identity = item.identity;
+                        }
+                    }
+                }
+            }
+        }
+
         fn record_rollback(&self, plan: &Plan, journal: &mut User) -> bool {
             let quarantines: BTreeMap<_, _> = self
                 .undo
@@ -664,7 +695,8 @@ mod native {
                     Undo::Delete(_) => {
                         Err(io::Error::other("rollback link identity was not journaled"))
                     }
-                    Undo::Restore(target) => fs.link(parent, &leaf, &target, Point::Rollback),
+                    // Renaming the retired link back keeps the node identity the ledger records.
+                    Undo::Restore(item) => fs.restore(parent, &leaf, &item),
                 }
                 .and_then(|()| fs.sync(parent));
                 let item = &mut report.operations[index];

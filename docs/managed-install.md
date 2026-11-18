@@ -29,10 +29,38 @@ must be disjoint, including filesystem aliases. State lives under `~/.agents.loc
 
 Agenvil owns a destination only when **the ledger and filesystem agree**. The ledger must record
 the destination and the filesystem entry must be a symlink whose raw target text exactly matches
-the recorded target. A pending update can also match its recorded previous target. An occupied pending
-create is ambiguous, even when its target matches the journal. Filename
-matches, matching file contents and equivalent resolved paths do not establish ownership. Unowned
-files, directories and links always survive.
+the recorded target and whose node identity (device and inode from `lstat`) matches the identity
+recorded when Agenvil created it. A pending update can also match its recorded previous target,
+again only with a journaled identity. An occupied pending create is ambiguous, even when its target
+matches the journal. Filename matches, matching file contents, identical link text and equivalent
+resolved paths do not establish ownership: if you delete a managed link and recreate one with the
+same target, sync treats it as yours and reports a conflict instead of updating or removing it.
+Unowned files, directories and links always survive.
+
+Identity is a filesystem fact, so it changes when Claude's config directory is restored from a
+backup, copied or migrated to another disk, even when every link text is preserved. Sync then
+fails closed with a conflict for each such link. To recover, review the links, move the reported
+destinations somewhere safe (or delete them if they are only Agenvil links) and run sync again; it
+recreates the missing links and records their new identities. Filesystems can reuse an inode number
+after a link is deleted, so identity is strong evidence, not a cryptographic proof.
+
+### Kit ownership and checkouts
+
+A ledger belongs to one kit **and one checkout**. Sync records the `[project].name` together with
+the canonical absolute path of the project root that applied it. A sync whose name or checkout path
+differs is refused before planning with an error that names both kits and both paths. Nothing is
+touched. Two unrelated repositories that share a `[project].name` therefore cannot update or remove
+each other's links.
+
+Ownership is never transferred silently. A future explicit command will hand ownership to a moved
+or re-cloned checkout (trusted-source enrollment, issues #45 and #48); there is no flag for it yet.
+Until then:
+
+- Keep syncing from the recorded checkout path. Moving a checkout back, or cloning it again at the
+  same path, restores sync because the path is the identity.
+- To switch to a different checkout or kit, retire the old install by hand: remove the links listed
+  in `~/.agents.local/state/ownership.json` from the Claude config root, move that ledger file
+  somewhere safe, then sync from the new checkout. Snapshots can stay where they are.
 
 Each agent or rule gets its own file symlink under `agents/` or `rules/`. Each skill gets its own
 directory symlink under `skills/`, including its supporting files. Sync never replaces any of the
@@ -86,6 +114,9 @@ A successful run clears the pending intents and records the applied build proven
 `~/.agents.local/state/ownership.json` uses a versioned envelope with a separate namespace for
 each harness. A missing file means an empty ledger. Invalid records, duplicate resources and
 unsupported schema versions stop sync. Agenvil preserves the raw JSON of other harness namespaces and Claude scopes.
+The format is unreleased, so ledgers written before `project_root` and `identity` existed are
+rejected as invalid rather than migrated; remove the recorded links and move the ledger aside
+as described under [Kit ownership and checkouts](#kit-ownership-and-checkouts).
 
 ```json
 {
@@ -97,6 +128,7 @@ unsupported schema versions stop sync. Agenvil preserves the raw JSON of other h
         "root": "/home/lee/.claude",
         "applied": {
           "kit": "my-agents",
+          "project_root": "/home/lee/src/my-agents",
           "manifest_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
           "generator": { "name": "agenvil", "version": "0.1.0" }
         },
@@ -108,7 +140,9 @@ unsupported schema versions stop sync. Agenvil preserves the raw JSON of other h
             "link_target": "/home/lee/.agents.local/agents/reviewer.md",
             "layer": "private",
             "kit": null,
+            "project_root": null,
             "resource_sha256": null,
+            "identity": [16777232, 4815162342],
             "pending": null
           }
         ]
@@ -120,10 +154,13 @@ unsupported schema versions stop sync. Agenvil preserves the raw JSON of other h
 
 - `root` binds ownership to one resolved Claude config directory. Each `destination` is relative
   to that root.
-- `applied` records the kit (`[project].name`), manifest digest and generator of the last
-  published commit. It is `null` until the first commit. Sync refuses a different kit.
-- A team entry records its kit and resource digest. A private entry tracks the link, so both
-  fields are `null` in the example.
+- `applied` records the kit (`[project].name`), the canonical checkout path (`project_root`),
+  manifest digest and generator of the last published commit. It is `null` until the first
+  commit. Sync refuses a different kit or checkout.
+- A team entry records its kit, checkout path and resource digest. A private entry tracks the
+  link, so these fields are `null` in the example.
+- `identity` is the `[device, inode]` of the installed symlink. A settled entry must have one;
+  pending entries may omit it (`null`) until the link exists. Quarantine records use the same form.
 - `pending` is `null` for a settled link. A journaled change records an `operation` (`create`,
   `update` or `remove`), a `previous_target` (a path or `null`) and optional `quarantines`
   with retirement names and expected link information. Ledger publication uses a lock and
@@ -135,14 +172,14 @@ unsupported schema versions stop sync. Agenvil preserves the raw JSON of other h
 | Reason | What to do |
 | --- | --- |
 | A destination is occupied without a ledger entry | Keep the existing entry and rename the incoming resource in its source, or move the existing entry somewhere safe if you want Agenvil to install at that path. Rebuild if the team source changed. |
-| A recorded link was redirected or replaced | Review the occupant and, if you want sync to manage the destination again, move the occupant somewhere safe. Agenvil treats it as user-owned. |
+| A recorded link was redirected, replaced or recreated (even with the same target) | Review the occupant and, if you want sync to manage the destination again, move the occupant somewhere safe. Agenvil treats it as user-owned. This also follows a backup restore or copy of the Claude config directory. |
 | An unsafe root or resource parent blocks access | Check `CLAUDE_CONFIG_DIR` and the reported path. Resolve the obstruction while preserving existing contents, then run the dry run again. |
 | A snapshot is corrupt or missing and cannot be restored from verified bytes | Check the reported snapshot path. Verify that the expected kit is staged and rebuild if needed. If the conflict persists, preserve the snapshot and ledger for investigation. |
 | The resolved Claude root differs from the ledger's root | Run sync against the recorded Claude config root. Ownership does not carry over to a different root. |
 | A pending destination matches neither recorded target and is still occupied | Review the apply report and preserve the occupant. If you intend to resume at that destination, move the occupant somewhere safe before retrying. |
 | An occupied pending create | Move the occupant somewhere safe before retrying. A matching target does not establish ownership. |
 | Two destination spellings resolve to the same entry | Resolve the case-only collision before applying. The existing link stays in place. |
-| The requested kit differs from the ledger's kit | Run sync with the recorded kit. |
+| The requested kit or checkout path differs from the ledger's | Run sync from the recorded checkout path with the recorded kit, or retire the old install by hand as described under [Kit ownership and checkouts](#kit-ownership-and-checkouts). |
 | A journaled retirement name holds an unexpected object | Preserve the object at the path reported by sync. Move it somewhere safe before retrying and review the original destination. |
 
 A broken managed link still has its recorded target text. Apply can restore a missing snapshot
@@ -153,7 +190,8 @@ the diagnostic. Sync never auto-repairs an invalid ledger.
 ## Recovery after an interrupted or failed apply
 
 Apply attempts to roll back completed link changes in reverse order and restore the prior
-ledger. An interruption or failed rollback can leave pending entries. Sync checks the journaled
+ledger. A replaced link is restored by renaming its retired original back, so it keeps its recorded
+identity. An interruption or failed rollback can leave pending entries. Sync checks the journaled
 retirement paths on retry and reports the location of unexpected objects for manual recovery.
 Before rollback retires a link that apply created, it journals that link's identity, so a retained
 link from a failed restore is recognised on retry instead of blocking the next plan.

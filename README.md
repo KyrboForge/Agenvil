@@ -183,7 +183,9 @@ portability model and future target-specific extension points.
 `agenvil sync --target claude` checks the staging tree and previews which user-level Claude agents,
 skills and rules it would link, update or remove. Pass `--dry-run` to preview explicitly or
 `--apply` to install the plan. Sync tracks
-individual links in an ownership ledger and preserves user-owned entries. See
+individual links in an ownership ledger and preserves user-owned entries. Installed links belong
+to the checkout that applied them; sync from another checkout is refused even under the same
+`[project].name`. See
 [`docs/managed-install.md`](docs/managed-install.md) for paths, private overrides and recovery.
 
 ## `agenvil check`

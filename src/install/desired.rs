@@ -31,6 +31,15 @@ impl Desired {
             out: out.to_owned(),
             findings,
         })?;
+        // The checkout path, not the mutable display name, identifies who owns installed links.
+        let project_root =
+            std::fs::canonicalize(root).map_err(|err| PlanError::inspect(root, err))?;
+        if project_root.to_str().is_none() {
+            return Err(PlanError::UnsafePath {
+                path: project_root,
+                reason: "paths must be UTF-8 to record ownership",
+            });
+        }
 
         let mut grouped = BTreeMap::<Key, BTreeMap<String, Content>>::new();
         for entry in entries {
@@ -70,6 +79,7 @@ impl Desired {
             resources,
             applied: Applied {
                 kit: config.project.name.clone(),
+                project_root,
                 manifest_sha256,
                 generator,
             },

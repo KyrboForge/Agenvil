@@ -4,9 +4,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use super::desired::{Desired, resource_digest};
-#[cfg(unix)]
-use super::ledger::NodeId;
-use super::ledger::{Entry, Ledger, target_digest};
+use super::ledger::{Entry, Ledger, NodeId, target_digest};
 use super::plan::{Ignored, IgnoredReason, Observed};
 use super::{Key, Kind, Locations, PlanError};
 use crate::{
@@ -278,8 +276,14 @@ impl Actual {
                         SnapshotCheck::Missing,
                     );
                 }
+                #[cfg(unix)]
+                let identity = node_ids.get(key).copied();
+                #[cfg(windows)]
+                let identity = None;
                 if let Observed::Symlink { target } = &observed
-                    && entries.get(key).is_some_and(|entry| entry.owns(target))
+                    && entries
+                        .get(key)
+                        .is_some_and(|entry| entry.owns(target, identity))
                     && let Some(digest) = target_digest(key, &paths.local, target)
                 {
                     snapshots.insert((key.clone(), digest.to_owned()), SnapshotCheck::Missing);
@@ -320,6 +324,20 @@ impl Actual {
             node_ids,
             snapshots,
         })
+    }
+}
+
+impl Actual {
+    pub fn node_id(&self, key: &Key) -> Option<NodeId> {
+        #[cfg(unix)]
+        {
+            self.node_ids.get(key).copied()
+        }
+        #[cfg(windows)]
+        {
+            let _ = key;
+            None
+        }
     }
 }
 

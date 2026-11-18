@@ -275,18 +275,27 @@ pub fn plan(
     }
     let roots = paths.open()?;
     let ledger = Ledger::read(roots.state.as_ref(), &paths.local, &paths.claude)?;
-    if let Some(installed) = ledger
+    let requested = &desired.applied;
+    if let Some((kit, project_root)) = ledger
         .user
         .as_ref()
         .and_then(|user| user.applied.as_ref())
-        .map(|applied| &applied.kit)
+        .map(|applied| (&applied.kit, &applied.project_root))
         .into_iter()
-        .chain(ledger.entries().filter_map(|entry| entry.kit.as_ref()))
-        .find(|kit| **kit != desired.applied.kit)
+        .chain(
+            ledger
+                .entries()
+                .filter_map(|entry| entry.kit.as_ref().zip(entry.project_root.as_ref())),
+        )
+        .find(|(kit, project_root)| {
+            **kit != requested.kit || !same_target(project_root, &requested.project_root)
+        })
     {
         return Err(PlanError::KitMismatch {
-            installed: installed.clone(),
-            requested: desired.applied.kit.clone(),
+            installed: kit.clone(),
+            installed_root: project_root.clone(),
+            requested: requested.kit.clone(),
+            requested_root: requested.project_root.clone(),
         });
     }
     let actual = Actual::inspect(&paths, &roots, &desired, &ledger)?;
@@ -401,7 +410,11 @@ fn reconcile(
         let ownership = match (observed, entry) {
             (Observed::Absent, _) => Ownership::Absent,
             (_, Some(entry)) if entry.pending_create() => Ownership::Mismatch,
-            (Observed::Symlink { target }, Some(entry)) if entry.owns(target) => Ownership::Managed,
+            (Observed::Symlink { target }, Some(entry))
+                if entry.owns(target, actual.node_id(key)) =>
+            {
+                Ownership::Managed
+            }
             (_, None) => Ownership::Unmanaged,
             (_, Some(_)) => Ownership::Mismatch,
         };
@@ -460,7 +473,7 @@ fn reconcile(
                 None,
                 entry.map(|entry| {
                     if let Observed::Symlink { target } = observed
-                        && entry.owns(target)
+                        && entry.owns(target, actual.node_id(key))
                     {
                         target.clone()
                     } else {

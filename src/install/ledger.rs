@@ -68,6 +68,7 @@ pub(super) struct User {
 #[serde(deny_unknown_fields)]
 pub(super) struct Applied {
     pub kit: String,
+    pub project_root: PathBuf,
     pub manifest_sha256: String,
     pub generator: manifest::Generator,
 }
@@ -81,7 +82,9 @@ pub(super) struct Entry {
     pub link_target: PathBuf,
     pub layer: Layer,
     pub kit: Option<String>,
+    pub project_root: Option<PathBuf>,
     pub resource_sha256: Option<String>,
+    pub identity: Option<NodeId>,
     pub pending: Option<Pending>,
 }
 
@@ -120,13 +123,22 @@ impl Entry {
         }
     }
 
-    pub fn owns(&self, target: &Path) -> bool {
-        same_target(&self.link_target, target)
-            || self
-                .pending
-                .as_ref()
+    /// Raw target text alone is not ownership: the link must also be the recorded node.
+    pub fn owns(&self, target: &Path, identity: Option<NodeId>) -> bool {
+        let pending = self.pending.as_ref();
+        let recorded = same_target(&self.link_target, target)
+            || pending
                 .and_then(|pending| pending.previous_target.as_deref())
-                .is_some_and(|previous| same_target(previous, target))
+                .is_some_and(|previous| same_target(previous, target));
+        recorded
+            && identity.is_some()
+            && (self.identity == identity
+                || pending.is_some_and(|pending| {
+                    pending
+                        .quarantines
+                        .iter()
+                        .any(|item| item.identity == identity && same_target(&item.target, target))
+                }))
     }
 
     pub fn pending_create(&self) -> bool {
@@ -143,6 +155,10 @@ impl Entry {
         let valid_target = match self.layer {
             Layer::Team => {
                 self.kit.is_some()
+                    && self
+                        .project_root
+                        .as_ref()
+                        .is_some_and(|root| root.is_absolute())
                     && self.resource_sha256.as_ref().is_some_and(|digest| {
                         is_digest(digest)
                             && same_target(&self.link_target, &key.snapshot_path(local, digest))
@@ -150,11 +166,14 @@ impl Entry {
             }
             Layer::Private => {
                 self.kit.is_none()
+                    && self.project_root.is_none()
                     && self.resource_sha256.is_none()
                     && same_target(&self.link_target, &key.private_path(local))
             }
         };
+        // A settled link must carry the node identity that proves it is still the installed link.
         valid_target
+            && (self.pending.is_some() || self.identity.is_some())
             && self.pending.as_ref().is_none_or(|pending| {
                 pending.quarantines.iter().all(|item| {
                     item.name
@@ -243,6 +262,7 @@ impl Ledger {
                     if !user.root.is_absolute()
                         || user.applied.as_ref().is_some_and(|applied| {
                             !is_digest(&applied.manifest_sha256)
+                                || !applied.project_root.is_absolute()
                         })
                     {
                         return Err(invalid(

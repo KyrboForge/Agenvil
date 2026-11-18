@@ -139,11 +139,15 @@ pub enum PlanError {
     #[error(transparent)]
     Ledger(#[from] LedgerError),
     #[error(
-        "installed kit {installed:?} differs from requested kit {requested:?}; kit switching is unsupported"
+        "installed kit {installed:?} from {} differs from requested kit {requested:?} from {}; sync from the recorded checkout, because ownership is never transferred between kits or checkouts",
+        installed_root.display(),
+        requested_root.display()
     )]
     KitMismatch {
         installed: String,
+        installed_root: PathBuf,
         requested: String,
+        requested_root: PathBuf,
     },
     #[error("retirement journal could not verify {}; preserve it and resolve its original destination {}", quarantine.display(), destination.display())]
     Quarantine {

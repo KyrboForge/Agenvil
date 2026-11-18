@@ -777,7 +777,7 @@ fn another_kit_cannot_plan_removal_of_installed_links() {
     p.write("agenvil.toml", CONFIG.replace("demo", "another-kit"));
     p.build();
     assert!(
-        matches!(p.plan_result(), Err(PlanError::KitMismatch { installed, requested })
+        matches!(p.plan_result(), Err(PlanError::KitMismatch { installed, requested, .. })
         if installed == "demo" && requested == "another-kit")
     );
     assert_eq!(fs::read(p.ledger()).unwrap(), ledger);
@@ -860,4 +860,75 @@ fn writable_snapshot_bucket_and_skill_directories_are_corrupt() {
         fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
     }
     assert!(!p.plan().has_conflicts());
+}
+
+#[test]
+fn same_named_kit_from_another_checkout_cannot_claim_installed_links() {
+    let a = Project::built();
+    a.apply();
+    let ledger = fs::read(a.ledger()).unwrap();
+    let dest = a.dest("agents/reviewer.md");
+    let (target, before) = (
+        fs::read_link(&dest).unwrap(),
+        fs::symlink_metadata(&dest).unwrap(),
+    );
+    let mut b = Project::built();
+    b.locations = a.locations.clone();
+    let refused = |b: &Project| {
+        matches!(b.plan_result(),
+            Err(PlanError::KitMismatch { installed, installed_root, requested, requested_root })
+            if installed == "demo" && requested == "demo"
+                && installed_root == fs::canonicalize(a.project.path()).unwrap()
+                && requested_root == fs::canonicalize(b.project.path()).unwrap())
+    };
+    assert!(refused(&b));
+    // Even a checkout that would only remove one of A's links is refused.
+    fs::remove_file(b.source("agents/reviewer.md")).unwrap();
+    b.build();
+    assert!(refused(&b));
+    assert_eq!(fs::read(a.ledger()).unwrap(), ledger);
+    let after = fs::symlink_metadata(&dest).unwrap();
+    assert_eq!(fs::read_link(&dest).unwrap(), target);
+    assert_eq!((after.dev(), after.ino()), (before.dev(), before.ino()));
+    assert_eq!(fs::read_to_string(a.dest("rules/style.md")).unwrap(), RULE);
+}
+
+#[test]
+fn recreated_link_with_identical_target_is_user_owned() {
+    let p = Project::built();
+    p.apply();
+    let dest = p.dest("agents/reviewer.md");
+    let target = fs::read_link(&dest).unwrap();
+    let managed = fs::symlink_metadata(&dest).unwrap().ino();
+    // Create the replacement before the old link is freed so the filesystem cannot reuse its inode.
+    let replacement = p.dest("agents/replacement");
+    symlink(&target, &replacement).unwrap();
+    fs::rename(&replacement, &dest).unwrap();
+    let user = fs::symlink_metadata(&dest).unwrap().ino();
+    assert_ne!(user, managed);
+    fs::remove_file(p.source("agents/reviewer.md")).unwrap();
+    p.build();
+    refuses_collision(&p, ConflictReason::OwnershipMismatch);
+    assert_eq!(fs::read_link(&dest).unwrap(), target);
+    assert_eq!(fs::symlink_metadata(&dest).unwrap().ino(), user);
+}
+
+#[test]
+fn ledger_rejects_a_missing_or_malformed_link_identity() {
+    let p = Project::built();
+    p.apply();
+    let ledger = p.ledger_json();
+    for identity in [
+        Value::Null,
+        serde_json::json!([1]),
+        serde_json::json!("1:2"),
+    ] {
+        let mut changed = ledger.clone();
+        changed["harnesses"]["claude"]["user"]["entries"][0]["identity"] = identity;
+        fs::write(p.ledger(), serde_json::to_vec(&changed).unwrap()).unwrap();
+        assert!(matches!(
+            p.plan_result(),
+            Err(PlanError::Ledger(LedgerError::Invalid { .. }))
+        ));
+    }
 }

@@ -357,6 +357,18 @@ mod native {
             result
         }
 
+        pub fn restore(&mut self, parent: &Root, leaf: &str, item: &Quarantine) -> io::Result<()> {
+            (self.0)(Point::Rollback)?;
+            if item.identity.is_none()
+                || node_identity(parent, &item.name)? != item.identity
+                || !matches!(observe(Some(parent), &item.name)?, Observed::Symlink { target }
+                    if same_target(&item.target, &target))
+            {
+                return Err(io::Error::other("retired link changed before restoration"));
+            }
+            rename_new(parent, &item.name, leaf)
+        }
+
         pub fn sync(&self, dir: &Root) -> io::Result<()> {
             Ok(fs::fsync(dir)?)
         }
