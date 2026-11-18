@@ -47,9 +47,14 @@ pub(super) fn merge(
     {
         remove_hook(&mut out, record, &mut prune);
     }
+    // Replacements and appends must not become sources for later hook updates.
+    let mut hook_sources = Value::Object(Map::new());
+    if let Some(hooks) = out.document.get("hooks") {
+        hook_sources["hooks"] = hooks.clone();
+    }
     for hook in &desired.hooks {
         let record = hooks.iter().find(|record| record.id == hook.id);
-        set_hook(&mut out, hook, record, hooks, desired);
+        set_hook(&mut out, hook, record, hooks, desired, &mut hook_sources);
     }
     // A kept or desired value owns everything at or below it, empty objects included.
     let kept: Vec<_> = desired
@@ -137,26 +142,21 @@ fn set_value(out: &mut Outcome, target: &str, desired: &Value, record: Option<&V
                 created,
             });
         }
-        Some(current) if current == *desired => {
-            let managed = record.is_some_and(|record| record.value == current);
-            let (owner, why) = if managed {
-                (Ownership::Managed, Reason::Current)
-            } else {
-                (Ownership::Unmanaged, Reason::Adopted)
-            };
-            value(Noop, owner, why, out);
-            out.values.push(match record {
-                Some(record) if managed => record.clone(),
-                // An equal user value is recorded as its own previous value, so removal keeps it.
-                _ => ValueRecord {
-                    pointer: target.to_owned(),
-                    value: current.clone(),
-                    previous: Some(Previous { value: current }),
-                    created: Vec::new(),
-                },
+        Some(current) if current == *desired && record.is_none() => {
+            value(Noop, Ownership::Unmanaged, Reason::Adopted, out);
+            // An equal user value is recorded as its own previous value, so removal keeps it.
+            out.values.push(ValueRecord {
+                pointer: target.to_owned(),
+                value: current.clone(),
+                previous: Some(Previous { value: current }),
+                created: Vec::new(),
             });
         }
         Some(current) => match record {
+            Some(record) if record.value == current && current == *desired => {
+                value(Noop, Ownership::Managed, Reason::Current, out);
+                out.values.push(record.clone());
+            }
             Some(record) if record.value == current => {
                 insert(&mut out.document, &parts, desired.clone());
                 value(Change, Ownership::Managed, Reason::Changed, out);
@@ -216,6 +216,7 @@ fn set_hook(
     record: Option<&HookRecord>,
     records: &[HookRecord],
     desired: &Fragment,
+    hook_sources: &mut Value,
 ) {
     use OperationKind::{Add, Change, Conflict, Noop};
     let report = |op, owner, why, out: &mut Outcome| {
@@ -229,13 +230,13 @@ fn set_hook(
             why,
         );
     };
-    let Ok(current) = groups(&out.document, &hook.event).map(<[Value]>::to_vec) else {
+    let Ok(current) = groups(&out.document, &hook.event) else {
         report(Conflict, Ownership::Unmanaged, Reason::TypeClash, out);
         out.hooks.extend(record.cloned());
         return;
     };
     if let Some(record) = record {
-        let Ok(old) = groups(&out.document, &record.event).map(<[Value]>::to_vec) else {
+        let Ok(old) = groups(hook_sources, &record.event) else {
             report(Conflict, Ownership::Mismatch, Reason::TypeClash, out);
             out.hooks.push(record.clone());
             return;
@@ -283,6 +284,8 @@ fn set_hook(
             array(&mut out.document, &hook.event, &mut created)[index] = hook.group.clone();
         } else {
             array(&mut out.document, &record.event, &mut created).remove(index);
+            // Keep the remaining source slots aligned with the live array.
+            array(hook_sources, &record.event, &mut Vec::new()).remove(index);
             array(&mut out.document, &hook.event, &mut created).push(hook.group.clone());
         }
         report(Change, Ownership::Managed, Reason::Changed, out);

@@ -273,6 +273,72 @@ fn updates_replace_values_and_hook_groups_in_place() {
 }
 
 #[test]
+fn reconcile_swapped_hook_groups_in_place_in_either_order() {
+    for reverse in [false, true] {
+        let home = Home::new();
+        home.install(&fragment(json!({"schema": 1, "hooks": [
+            hook("first", "PreToolUse", "a"),
+            hook("second", "PreToolUse", "b")
+        ]})));
+
+        let mut hooks = [
+            hook("first", "PreToolUse", "b"),
+            hook("second", "PreToolUse", "a"),
+        ];
+        if reverse {
+            hooks.reverse();
+        }
+        let next = fragment(json!({"schema": 1, "hooks": hooks}));
+        let plan = home.install(&next);
+        assert_eq!(plan.summary.change, 2);
+
+        let doc = home.json();
+        let groups = &doc["hooks"]["PreToolUse"];
+        assert_eq!(*groups, json!([group("b"), group("a")]));
+        let state: Value = serde_json::from_slice(&home.state().unwrap()).unwrap();
+        let records = state["harnesses"]["claude"]["user"]["hooks"]
+            .as_array()
+            .unwrap();
+        for (index, id) in ["first", "second"].into_iter().enumerate() {
+            let record = records.iter().find(|record| record["id"] == id).unwrap();
+            assert_eq!(record["event"], "PreToolUse");
+            assert_eq!(record["group"], groups[index]);
+        }
+
+        let repeated = home.plan(Some(&next));
+        assert_eq!(repeated.operations.len(), 2);
+        assert_eq!(repeated.summary.noop, 2);
+        assert_eq!(repeated.files.settings.action, FileAction::Unchanged);
+        assert_eq!(repeated.files.state.action, FileAction::Unchanged);
+    }
+}
+
+#[test]
+fn reconcile_hook_moves_without_shifting_later_sources() {
+    let home = Home::new();
+    home.install(&fragment(json!({"schema": 1, "hooks": [
+        hook("obsolete", "PreToolUse", "obsolete"),
+        hook("outside-left", "PreToolUse", "left"),
+        hook("stays", "PreToolUse", "old"),
+        hook("outside-right", "PreToolUse", "right")
+    ]})));
+
+    let next = fragment(json!({"schema": 1, "hooks": [
+        hook("outside-right", "PostToolUse", "right"),
+        hook("outside-left", "PostToolUse", "left"),
+        hook("stays", "PreToolUse", "new")
+    ]}));
+    let plan = home.install(&next);
+    assert_eq!(plan.summary.change, 3);
+    assert_eq!(plan.summary.remove, 1);
+    assert_eq!(
+        home.json()["hooks"],
+        json!({"PreToolUse": [group("new")], "PostToolUse": [group("right"), group("left")]})
+    );
+    assert_eq!(home.plan(Some(&next)).summary.noop, 3);
+}
+
+#[test]
 fn user_edits_after_install_are_conflicts_and_never_overwritten() {
     let home = Home::new();
     home.install(&basic());
@@ -520,21 +586,35 @@ fn a_failed_settings_publication_puts_the_previous_records_back() {
 }
 
 #[test]
-fn a_value_edited_by_the_user_is_kept_on_removal_once_adopted() {
+fn a_managed_value_edited_to_match_the_new_desired_value_conflicts() {
     let home = Home::new();
     home.install(&fragment(
         json!({"schema": 1, "values": {"/model": "opus"}}),
     ));
+    let recorded = home.state().unwrap();
     home.write(r#"{"model": "sonnet"}"#);
-    let plan = home.install(&fragment(
-        json!({"schema": 1, "values": {"/model": "sonnet"}}),
-    ));
+    let before = home.bytes();
+
+    let next = fragment(json!({"schema": 1, "values": {"/model": "sonnet"}}));
+    let plan = home.plan(Some(&next));
     assert_eq!(
-        ops(&plan)[0],
-        (OperationKind::Noop, "/model", Reason::Adopted)
+        ops(&plan),
+        [(OperationKind::Conflict, "/model", Reason::UserEdited)]
     );
-    apply(&home.plan(None)).unwrap();
-    assert_eq!(home.json(), json!({"model": "sonnet"}));
+    assert_eq!(plan.operations[0].ownership, Ownership::Mismatch);
+    assert_eq!(plan.files.settings.action, FileAction::Unchanged);
+    assert_eq!(plan.files.state.action, FileAction::Unchanged);
+    assert!(matches!(
+        apply(&plan),
+        Err(ApplyError::Conflicts { count: 1 })
+    ));
+    assert_eq!(home.bytes(), before);
+    assert_eq!(home.state().unwrap(), recorded);
+    let state: Value = serde_json::from_slice(&recorded).unwrap();
+    assert_eq!(
+        state["harnesses"]["claude"]["user"]["values"][0]["value"],
+        "opus"
+    );
 }
 
 #[test]
