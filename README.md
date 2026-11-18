@@ -4,7 +4,7 @@
 
 > **Status: v0.1, in progress.** Configuration loading, exit codes, `inventory`, `check`, `rules`,
 > `explain` and `build --target claude` are implemented (see [`docs/rules.md`](docs/rules.md) for
-> which rules). Drift checks (`build --check`) and cleanup are too; installation is not.
+> which rules). Drift checks (`build --check`), cleanup and managed Claude installation are also available.
 
 ## Quickstart
 
@@ -33,6 +33,7 @@ For existing TAK-style configurations, see [migration guidance](docs/compatibili
 | `agenvil build --target claude --check [--out DIR]` | read-only, offline | compare the staging tree with what the sources generate; never creates it ([`docs/build.md`](docs/build.md#drift-checks-build---check)) |
 | `agenvil build --target claude --clean [--apply]` | dry run unless `--apply` | remove stale generated files, only those whose digests still match ([`docs/build.md`](docs/build.md#cleanup---clean)) |
 | `agenvil build --target claude [--out DIR]` | writes `.generated/claude/` | build a Claude-native staging tree from the sources; never installs, never touches `~/.claude` ([`docs/build.md`](docs/build.md)) |
+| `agenvil sync --target claude [--dry-run\|--apply] [--out DIR] [--format human\|json]` | dry run unless `--apply`, offline | reconcile user-level Claude agents, skills and rules from approved staging and the private layer ([`docs/managed-install.md`](docs/managed-install.md)) |
 
 `--root <DIR>` selects the project root; the default is the current directory. The config file is
 `<root>/agenvil.toml` unless `--config <FILE>` overrides it (no search of parent directories). It must be a regular file of at
@@ -132,7 +133,7 @@ unusable" and keep policy findings separate. `Frontmatter::metadata` is a
 
 `agenvil build --target claude` turns an `agenvil.toml`, `agents/` and `skills/` into a Claude Code
 staging tree in `.generated/claude/`. The output is **staging only**: nothing is installed, and
-`~/.claude` is never written. Copy or link the tree where you want it. See
+`~/.claude` is never written. Use `agenvil sync --target claude` to plan a managed install. See
 [`docs/build.md`](docs/build.md) for a minimal project, skill references, model/effort mapping,
 the manifest and the safety rules.
 
@@ -176,6 +177,14 @@ See [`docs/build.md#project-instructions-claudemd`](docs/build.md#project-instru
 for source validation rules, manifest format, `--check`/`--clean` behaviour, and the distinction
 between staging and installing. See [`docs/instructions.md`](docs/instructions.md) for the
 portability model and future target-specific extension points.
+
+## `agenvil sync`
+
+`agenvil sync --target claude` checks the staging tree and previews which user-level Claude agents,
+skills and rules it would link, update or remove. Pass `--dry-run` to preview explicitly or
+`--apply` to install the plan. Sync tracks
+individual links in an ownership ledger and preserves user-owned entries. See
+[`docs/managed-install.md`](docs/managed-install.md) for paths, private overrides and recovery.
 
 ## `agenvil check`
 
