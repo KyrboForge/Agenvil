@@ -476,6 +476,8 @@ mod native {
                     });
                     Some(wanted)
                 }
+                // Keep recovery data until verification confirms the destination is absent.
+                Remove if op.observed == Observed::Absent => existing.cloned(),
                 Remove => {
                     let mut entry = existing.expect("removal requires ownership").clone();
                     // A retry may still find the old side of an interrupted update. Retain that proof.
@@ -589,6 +591,9 @@ mod native {
 
         fn execute(&mut self, plan: &Plan, index: usize, fs: &mut Fs<'_>) -> io::Result<()> {
             let op = &plan.operations()[index];
+            if op.operation == OperationKind::Remove && op.observed == Observed::Absent {
+                return Ok(());
+            }
             if self.root.is_none() {
                 self.root = Some(fs.path(plan.root())?);
             }

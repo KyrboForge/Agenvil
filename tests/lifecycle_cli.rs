@@ -220,6 +220,49 @@ fn uninstall_allows_sync_at_a_new_claude_root() {
 }
 
 #[test]
+fn uninstall_drops_the_last_missing_link_and_allows_a_different_kit() {
+    let fixture = Fixture::new();
+    fs::remove_file(fixture.project().join("rules/b.md")).unwrap();
+    fixture.build();
+    fixture.sync();
+    let link = fixture.claude.join("rules/a.md");
+    assert!(link.is_symlink());
+    fs::remove_file(&link).unwrap();
+
+    let before = fixture.snapshot();
+    let dry = output_json(&fixture.run("uninstall", &["--format", "json"]).success());
+    assert_eq!(fixture.snapshot(), before);
+
+    let applied = output_json(
+        &fixture
+            .run("uninstall", &["--apply", "--format", "json"])
+            .success(),
+    );
+    let ledger = fixture.local.join("state/ownership.json");
+    let state: Value = serde_json::from_slice(&fs::read(ledger).unwrap()).unwrap();
+    assert!(state["harnesses"]["claude"]["user"].is_null(), "{state}");
+    assert_eq!(applied["links"]["ledger"], "committed");
+    assert_eq!(dry["links"]["summary"]["remove"], 1);
+    assert_eq!(dry["links"]["operations"][0]["destination"], "rules/a.md");
+    assert!(!link.exists());
+
+    let detached = fixture.snapshot();
+    fixture
+        .run("uninstall", &["--apply"])
+        .success()
+        .stdout(predicate::str::contains("nothing to uninstall"));
+    assert_eq!(fixture.snapshot(), detached);
+
+    put(
+        &fixture.project().join("agenvil.toml"),
+        "schema = 1\n[project]\nname = 'another-kit'\n",
+    );
+    fixture.build();
+    fixture.sync();
+    assert!(link.is_symlink());
+}
+
+#[test]
 fn uninstall_cleans_only_its_retired_links() {
     let fixture = Fixture::new();
     fixture.build();

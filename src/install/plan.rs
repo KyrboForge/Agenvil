@@ -480,6 +480,9 @@ fn reconcile(
                     (Noop, reason)
                 }
                 (Some(_), _) => (Update, Why::Changed),
+                (None, Observed::Absent) if desired.applied.is_none() && entry.is_some() => {
+                    (Remove, Why::ManagedLinkRemoved)
+                }
                 (None, Observed::Absent) => (Noop, Why::ManagedLinkRemoved),
                 (None, _) => (Remove, Why::Obsolete),
             };
