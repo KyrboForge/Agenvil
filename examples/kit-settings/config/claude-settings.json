@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "hooks": [
+    {
+      "id": "rtk-pretooluse",
+      "event": "PreToolUse",
+      "group": {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "true"
+          }
+        ]
+      }
+    }
+  ]
+}

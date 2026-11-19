@@ -1,6 +1,7 @@
 use std::collections::{BTreeSet, HashSet};
+use std::ffi::OsStr;
 use std::fmt;
-use std::io::Read;
+use std::io::{self, Read};
 use std::path::Path;
 
 use serde::Deserialize;
@@ -8,7 +9,9 @@ use serde::de::{Deserializer, MapAccess, Visitor};
 use serde_json::Value;
 
 use super::{Error, MAX_BYTES};
+use crate::config::RelPath;
 use crate::manifest;
+use crate::stage::{PathKind, pinned::Root};
 
 const SCHEMA: u32 = 1;
 /// `env` never merges; hooks enter only through `hooks[]`, where each group is tracked by ID.
@@ -65,6 +68,45 @@ impl<'de> Deserialize<'de> for Values {
 }
 
 impl Fragment {
+    /// Reads a kit source through the pinned checkout, rejecting descendant symlinks.
+    pub(in crate::install) fn read_source(root: &Path, relative: &RelPath) -> Result<Self, Error> {
+        let path = root.join(relative.as_path());
+        let invalid = |detail| Error::Fragment {
+            path: path.clone(),
+            detail,
+        };
+        let read_error = |error: io::Error| match error.kind() {
+            io::ErrorKind::NotFound => Error::MissingFragment { path: path.clone() },
+            _ => invalid(error.to_string()),
+        };
+        let components = relative.to_slash();
+        let (dirs, name) = components.rsplit_once('/').unwrap_or(("", &components));
+        let canonical = root.canonicalize().map_err(read_error)?;
+        let mut parent = Root::open_checked(&canonical)
+            .map_err(read_error)?
+            .ok_or_else(|| read_error(io::ErrorKind::NotFound.into()))?;
+        for component in dirs.split('/').filter(|part| !part.is_empty()) {
+            let component = OsStr::new(component);
+            match parent.kind(component).map_err(read_error)? {
+                None => return Err(Error::MissingFragment { path }),
+                Some(PathKind::Directory) => {}
+                Some(_) => {
+                    return Err(invalid(
+                        "parent is not a directory; symlinks are refused".into(),
+                    ));
+                }
+            }
+            parent = parent
+                .child(component)
+                .map_err(read_error)?
+                .ok_or_else(|| read_error(io::ErrorKind::NotFound.into()))?;
+        }
+        let (bytes, _) = super::read(Some(&parent), name)
+            .map_err(read_error)?
+            .ok_or_else(|| read_error(io::ErrorKind::NotFound.into()))?;
+        Self::parse(&bytes).map_err(invalid)
+    }
+
     pub fn read(path: &Path) -> Result<Self, Error> {
         let invalid = |detail: String| Error::Fragment {
             path: path.to_owned(),

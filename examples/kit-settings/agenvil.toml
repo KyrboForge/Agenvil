@@ -1,0 +1,7 @@
+schema = 1
+
+[project]
+name = "kit-settings"
+
+[targets.claude.settings]
+fragment = "config/claude-settings.json"

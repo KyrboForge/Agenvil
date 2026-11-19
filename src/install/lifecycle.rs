@@ -1,15 +1,15 @@
 //! Compose Claude lifecycle operations from the install and settings engines.
 //!
-//! Init and update can plan and apply staged links with `sync_plan` and `sync_apply`,
-//! then independently plan and apply a reviewed settings fragment if available.
+//! Sync reconciles staged links and kit settings.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
 use super::{
     ApplyError, ApplyReport, Locations, Operation, OperationKind, Plan, PlanError, settings,
 };
+use crate::config::Config;
 use crate::diagnostics::Exit;
 
 pub use super::ledger::Intent as LinkIntent;
@@ -18,6 +18,92 @@ pub use super::settings::{
     restore_apply, restore_backups, restore_plan,
 };
 pub use super::{apply as sync_apply, plan as sync_plan};
+
+/// Read the optional fragment from the checkout, even when config was loaded via --config.
+pub fn source_settings(
+    root: &Path,
+    config: &Config,
+) -> Result<Option<settings::Fragment>, settings::Error> {
+    config
+        .targets
+        .claude
+        .settings
+        .as_ref()
+        .map(|source| settings::Fragment::read_source(root, &source.fragment))
+        .transpose()
+}
+
+#[derive(Debug, Serialize)]
+pub struct SyncPlan {
+    #[serde(flatten)]
+    pub links: Plan,
+    pub settings: settings::Plan,
+}
+
+impl SyncPlan {
+    pub fn with_settings(
+        links: Plan,
+        locations: &Locations,
+        fragment: Option<&settings::Fragment>,
+    ) -> Result<Self, settings::Error> {
+        let mut settings = settings_plan(locations, fragment)?;
+        if let Some(fragment) = fragment {
+            settings.include_hook_commands(fragment);
+        }
+        Ok(Self { links, settings })
+    }
+
+    pub fn check_settings_conflicts(&self) -> Result<(), settings::ApplyError> {
+        if self.settings.has_conflicts() {
+            return Err(settings::ApplyError::Conflicts {
+                count: self.settings.summary.conflict,
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SyncApplyError {
+    #[error(transparent)]
+    Links(#[from] ApplyError),
+    #[error(transparent)]
+    SettingsConflict(#[from] settings::ApplyError),
+    #[error("links applied; settings failed; re-run sync to retry: {source}")]
+    Settings {
+        source: settings::ApplyError,
+        links: Box<ApplyReport>,
+    },
+}
+
+impl SyncApplyError {
+    pub fn exit(&self) -> Exit {
+        match self {
+            Self::Links(error) => error.exit(),
+            Self::SettingsConflict(error) | Self::Settings { source: error, .. } => error.exit(),
+        }
+    }
+
+    pub fn link_report(&self) -> Option<&ApplyReport> {
+        match self {
+            Self::Links(error) => error.report(),
+            Self::SettingsConflict(_) => None,
+            Self::Settings { links, .. } => Some(links),
+        }
+    }
+}
+
+pub fn sync_with_settings_apply(plan: &SyncPlan) -> Result<ApplyReport, SyncApplyError> {
+    plan.check_settings_conflicts()?;
+    let links = sync_apply(&plan.links)?;
+    if let Err(source) = settings_apply(&plan.settings) {
+        return Err(SyncApplyError::Settings {
+            source,
+            links: Box::new(links),
+        });
+    }
+    Ok(links)
+}
 
 /// Read-only plan for detaching the recorded Claude user install.
 #[derive(Debug, Serialize)]

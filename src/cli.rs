@@ -84,7 +84,7 @@ pub enum Command {
         #[arg(long, requires = "clean")]
         apply: bool,
     },
-    /// Plan or apply managed Claude resource links
+    /// Plan or apply managed Claude resource links and settings
     Sync {
         #[arg(long, value_enum)]
         target: Target,
@@ -227,7 +227,7 @@ enum Error {
     #[error(transparent)]
     SyncPlan(#[from] install::PlanError),
     #[error(transparent)]
-    SyncApply(#[from] install::ApplyError),
+    SyncApply(#[from] lifecycle::SyncApplyError),
     #[error(transparent)]
     ManagedSettings(#[from] install::settings::Error),
     #[error(transparent)]
@@ -425,6 +425,7 @@ fn execute(cli: &Cli) -> Result<(), Error> {
             clean,
             apply,
         } => {
+            lifecycle::source_settings(root, &config)?;
             let inventory = Inventory::build(root, &config, &build::limits())?;
             let out = out.clone().unwrap_or_else(|| root.join(build::DEFAULT_OUT));
             if *check || *clean {
@@ -655,38 +656,45 @@ fn sync(
     apply: bool,
     format: SyncFormat,
 ) -> Result<(), Error> {
-    let plan = install::plan(root, config, out, &locations()?).inspect_err(|error| {
+    let fragment = lifecycle::source_settings(root, config)?;
+    let locations = locations()?;
+    let links = lifecycle::sync_plan(root, config, out, &locations).inspect_err(|error| {
         if let install::PlanError::Staging { out, findings } = error {
             eprint!("{}", stage::report(out, findings));
         }
     })?;
+    let plan = lifecycle::SyncPlan::with_settings(links, &locations, fragment.as_ref())?;
+    let links = &plan.links;
     match format {
         SyncFormat::Json => println!("{}", serde_json::to_string_pretty(&plan)?),
         SyncFormat::Human => {
-            println!("Claude config at {}", plan.root().display());
-            for op in plan.operations() {
+            println!("Claude config at {}", links.root().display());
+            for op in links.operations() {
                 print!("{:?} {}", op.operation, op.destination);
                 if let Some(target) = &op.link_target {
                     print!(" -> {}", target.display());
                 }
                 println!(" ({})", op.reason);
             }
-            for snapshot in plan.snapshots() {
+            for snapshot in links.snapshots() {
                 if snapshot.status != install::SnapshotStatus::Verified {
                     println!("{:?} snapshot {}", snapshot.status, snapshot.path.display());
                 }
             }
-            for entry in plan.ignored() {
+            for entry in links.ignored() {
                 println!("Ignored private {} ({:?})", entry.path, entry.reason);
             }
-            let counts = plan.summary();
+            let counts = links.summary();
             println!(
                 "{} create, {} update, {} remove, {} unchanged, {} conflict",
                 counts.create, counts.update, counts.remove, counts.noop, counts.conflict
             );
+            println!("Claude settings");
+            print_settings_plan(&plan.settings);
         }
     }
-    let unsafe_count = plan
+    plan.check_settings_conflicts()?;
+    let unsafe_count = links
         .operations()
         .iter()
         .filter(|op| {
@@ -696,20 +704,22 @@ fn sync(
     if unsafe_count != 0 {
         return Err(Error::UnsafeSync(unsafe_count));
     }
-    if plan.has_conflicts() {
-        return Err(install::ApplyError::Conflicts {
-            count: plan.summary().conflict,
-        }
-        .into());
+    if links.has_conflicts() {
+        return Err(
+            lifecycle::SyncApplyError::Links(install::ApplyError::Conflicts {
+                count: links.summary().conflict,
+            })
+            .into(),
+        );
     }
     if apply {
-        match install::apply(&plan) {
+        match lifecycle::sync_with_settings_apply(&plan) {
             Ok(report) if matches!(format, SyncFormat::Human) => {
                 println!("Ledger {:?}", report.ledger)
             }
             Ok(_) => {}
             Err(error) => {
-                if let Some(report) = error.report() {
+                if let Some(report) = error.link_report() {
                     eprintln!("{}", serde_json::to_string_pretty(report)?);
                 }
                 return Err(error.into());
@@ -739,21 +749,7 @@ fn settings(fragment: Option<&Path>, apply: bool, format: SyncFormat) -> Result<
         SyncFormat::Json => println!("{}", serde_json::to_string_pretty(&plan)?),
         SyncFormat::Human => {
             println!("Claude config at {}", plan.root.display());
-            for op in &plan.operations {
-                print!("{:?} {:?} {}", op.operation, op.kind, op.target);
-                if let Some(event) = &op.event {
-                    print!(" [{event}]");
-                }
-                println!(" ({:?}, {})", op.ownership, op.reason);
-            }
-            for file in [&plan.files.settings, &plan.files.state] {
-                println!("{:?} {}", file.action, file.path.display());
-            }
-            let counts = &plan.summary;
-            println!(
-                "{} add, {} change, {} remove, {} unchanged, {} conflict",
-                counts.add, counts.change, counts.remove, counts.noop, counts.conflict
-            );
+            print_settings_plan(&plan);
         }
     }
     if plan.has_conflicts() {
@@ -769,6 +765,29 @@ fn settings(fragment: Option<&Path>, apply: bool, format: SyncFormat) -> Result<
         }
     }
     Ok(())
+}
+
+fn print_settings_plan(plan: &install::settings::Plan) {
+    for op in &plan.operations {
+        print!("{:?} {:?} {}", op.operation, op.kind, op.target);
+        if let Some(event) = &op.event {
+            print!(" [{event}]");
+        }
+        println!(" ({:?}, {})", op.ownership, op.reason);
+        if let Some(commands) = &op.commands {
+            for command in commands {
+                println!("  command {command:?}");
+            }
+        }
+    }
+    for file in [&plan.files.settings, &plan.files.state] {
+        println!("{:?} {}", file.action, file.path.display());
+    }
+    let counts = &plan.summary;
+    println!(
+        "{} add, {} change, {} remove, {} unchanged, {} conflict",
+        counts.add, counts.change, counts.remove, counts.noop, counts.conflict
+    );
 }
 
 /// Prints the findings, then picks the exit: an unsafe tree is a usage error (2), any other

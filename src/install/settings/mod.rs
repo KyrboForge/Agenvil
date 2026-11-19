@@ -36,6 +36,8 @@ const MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("missing settings fragment {}; nothing was changed", path.display())]
+    MissingFragment { path: PathBuf },
     #[error("invalid settings fragment {} ({detail}); nothing was changed", path.display())]
     Fragment { path: PathBuf, detail: String },
     #[error(transparent)]
@@ -116,6 +118,8 @@ pub struct Operation {
     pub target: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub event: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commands: Option<Vec<String>>,
     pub ownership: Ownership,
     pub reason: Reason,
 }
@@ -201,6 +205,24 @@ impl std::fmt::Debug for Plan {
 impl Plan {
     pub fn has_conflicts(&self) -> bool {
         self.summary.conflict != 0
+    }
+
+    pub(super) fn include_hook_commands(&mut self, desired: &Fragment) {
+        for op in &mut self.operations {
+            if op.kind != EntryKind::Hook
+                || !matches!(op.operation, OperationKind::Add | OperationKind::Change)
+            {
+                continue;
+            }
+            if let Some(hook) = desired.hooks.iter().find(|hook| hook.id == op.target) {
+                op.commands = Some(
+                    fragment::commands(&hook.group)
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect(),
+                );
+            }
+        }
     }
 }
 

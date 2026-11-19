@@ -35,9 +35,16 @@ fn doctor(fixture: &Fixture, code: i32) -> Value {
 #[test]
 fn clean_doctor_is_read_only_and_json_is_byte_stable() {
     let fixture = Fixture::new();
+    put(
+        &fixture.project().join("agenvil.toml"),
+        "schema = 1\n[project]\nname = 'lifecycle-test'\n[targets.claude.settings]\nfragment = 'fragment.json'\n",
+    );
+    put(
+        &fixture.project().join("fragment.json"),
+        r#"{"schema":1,"values":{"/model":"opus"}}"#,
+    );
     fixture.build();
     fixture.sync();
-    fixture.install_settings(&json!({"schema": 1, "values": {"/model": "opus"}}));
     let before = fixture.snapshot();
 
     let first = fixture.run("doctor", &["--format", "json"]).success();
@@ -51,6 +58,8 @@ fn clean_doctor_is_read_only_and_json_is_byte_stable() {
         "build.staging",
         "links.ownership",
         "settings.consistency",
+        "settings.source",
+        "settings.desired",
         "operations.interrupted",
     ] {
         expect_status(&report, id, "healthy");
@@ -62,7 +71,7 @@ fn clean_doctor_is_read_only_and_json_is_byte_stable() {
     for id in ["auth.claude", "integration.rtk", "integration.headroom"] {
         expect_status(&report, id, "unsupported");
     }
-    assert_eq!(report["summary"]["healthy"], 5);
+    assert_eq!(report["summary"]["healthy"], 7);
     assert_eq!(report["summary"]["missing"], 2);
     assert_eq!(report["summary"]["unsupported"], 3);
     fixture.run("doctor", &[]).success().stdout(

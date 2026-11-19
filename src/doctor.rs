@@ -208,7 +208,7 @@ pub fn diagnose(
         )),
     }
 
-    checks.push(check_settings(locations));
+    check_settings(root, config.as_ref().ok(), locations, &mut checks);
     checks.push(check_operations(locations));
     checks.push(prerequisite("prereq.claude_cli", "claude"));
     checks.push(prerequisite("prereq.git", "git"));
@@ -352,10 +352,48 @@ fn missing_target(operation: &Operation) -> bool {
             if fs::metadata(target).is_err_and(|e| e.kind() == io::ErrorKind::NotFound))
 }
 
-fn check_settings(locations: &Locations) -> Check {
+fn check_settings(
+    root: &Path,
+    config: Option<&Config>,
+    locations: &Locations,
+    checks: &mut Vec<Check>,
+) {
+    let source = config.map(|config| lifecycle::source_settings(root, config));
+    let desired = source.as_ref().and_then(|source| source.as_ref().ok());
+    let plan = lifecycle::settings_plan(locations, desired.and_then(Option::as_ref));
+    let source_usable = desired.is_some();
+    checks.push(check_settings_consistency(&plan));
+    if let Some(source) = source {
+        let id = "settings.source";
+        let check = match source {
+            Ok(Some(_)) => Check::new(id, Status::Healthy, "Kit settings fragment valid"),
+            Ok(None) => Check::new(id, Status::Healthy, "Kit declares no settings fragment"),
+            Err(error) => {
+                let (status, summary) = if matches!(error, settings::Error::MissingFragment { .. })
+                {
+                    (Status::Missing, "Kit settings fragment missing")
+                } else {
+                    (
+                        Status::UserActionRequired,
+                        "Kit settings fragment invalid or unsafe",
+                    )
+                };
+                Check::new(id, status, summary)
+                    .detail(error.to_string())
+                    .remediation("Fix the declared fragment before re-running sync.")
+            }
+        };
+        checks.push(check);
+        if source_usable {
+            checks.push(check_settings_desired(&plan));
+        }
+    }
+}
+
+fn check_settings_consistency(plan: &Result<settings::Plan, settings::Error>) -> Check {
     use settings::Reason::*;
     let id = "settings.consistency";
-    let plan = match lifecycle::settings_plan(locations, None) {
+    let plan = match plan {
         Ok(plan) => plan,
         Err(error) => {
             return Check::new(
@@ -379,11 +417,7 @@ fn check_settings(locations: &Locations) -> Check {
         if finding.priority(true) > status.priority(true) {
             status = finding;
         }
-        let subject = match &op.event {
-            Some(event) => format!("{event}/{}", op.target),
-            None => op.target.clone(),
-        };
-        details.push(format!("{subject} ({})", op.reason));
+        details.push(setting_detail(op));
     }
     let subject = plan.files.settings.path.display().to_string();
     if details.is_empty() {
@@ -397,6 +431,56 @@ fn check_settings(locations: &Locations) -> Check {
         .detail(details.join("\n"))
         .remediation("Review the listed values and hooks before applying settings changes.")
         .subject(subject)
+    }
+}
+
+fn check_settings_desired(plan: &Result<settings::Plan, settings::Error>) -> Check {
+    use settings::{FileAction, OperationKind};
+    let id = "settings.desired";
+    let plan = match plan {
+        Ok(plan) => plan,
+        Err(error) => {
+            return Check::new(
+                id,
+                Status::UserActionRequired,
+                "Cannot compare settings with the kit",
+            )
+            .detail(error.to_string());
+        }
+    };
+    let remediation = "Preview sync and review the settings operations.";
+    if plan.has_conflicts() {
+        Check::new(
+            id,
+            Status::UserActionRequired,
+            "Settings conflicts block sync",
+        )
+        .detail(
+            plan.operations
+                .iter()
+                .filter(|op| op.operation == OperationKind::Conflict)
+                .map(setting_detail)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .remediation(remediation)
+    } else if plan.files.settings.action != FileAction::Unchanged
+        || plan.files.state.action != FileAction::Unchanged
+        || plan
+            .operations
+            .iter()
+            .any(|op| op.operation != OperationKind::Noop)
+    {
+        Check::new(id, Status::Drifted, "Kit settings need sync").remediation(remediation)
+    } else {
+        Check::new(id, Status::Healthy, "Settings match the kit")
+    }
+}
+
+fn setting_detail(op: &settings::Operation) -> String {
+    match &op.event {
+        Some(event) => format!("{event}/{} ({})", op.target, op.reason),
+        None => format!("{} ({})", op.target, op.reason),
     }
 }
 

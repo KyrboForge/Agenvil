@@ -2,8 +2,8 @@
 
 Sync reconciles Claude Code's user-level agents, skills and rules from an approved staging tree
 and the local private layer. It is the low-level, offline reconcile command and does no Git work.
-Future `init` and `update` commands can compose this reconcile step. Sync does not touch
-settings. Use the separate [settings command](managed-settings.md) to merge values and hooks.
+Future `init` and `update` commands can compose this reconcile step. Sync also reconciles
+[kit-declared Claude settings](managed-settings.md#kit-declaration).
 See the [lifecycle guide](lifecycle.md) for doctor, uninstall and settings restore.
 
 ## Running it
@@ -92,22 +92,27 @@ remove the link otherwise. The plan lists unsafe names and entries of the wrong 
 ## Dry run and apply
 
 The default is a **dry run**. You can pass `--dry-run` explicitly. It conflicts with `--apply`.
-A dry run verifies staging, reads the ledger, inspects destinations and snapshots, and prints
-the plan without creating directories, taking a lock or writing files. Sync never executes
-staged skill files.
+Sync validates the source fragment first. A dry run verifies staging, reads ownership records,
+inspects destinations, snapshots and settings, and prints the plan without creating directories,
+taking locks or writing files. Sync never executes staged skill files or hook commands.
 
 `--format json` prints the dry-run plan with `schema` (currently `1`), `harness`, `scope`, `root`,
-`kit`, `operations`, `summary` (operation counts), `snapshots` and `ignored`. Operations are sorted
-by kind and name. Each has `operation`, `kind`, `name`, `layer`, `destination`, `source`,
+`kit`, `operations`, `summary` (operation counts), `snapshots`, `ignored` and `settings`.
+Link operations are sorted by kind and name. Each has `operation`, `kind`, `name`, `layer`, `destination`, `source`,
 `link_target`, `ownership`, `observed` and `reason`. The operation is `create`, `update`, `remove`,
 `noop` or `conflict`. Ownership is `managed`, `unmanaged`, `absent` or `mismatch`.
+
+The `settings` object holds the plan shown in the human `Claude settings` section.
+See the [settings plan fields](managed-settings.md#dry-run-and-apply).
 
 `--apply` refuses the entire plan if it has any conflict. On a supported platform it takes the
 state lock, checks that the ledger and observed destinations still match the plan, and publishes
 any missing snapshots from verified bytes. It records pending intents before changing links.
 Apply creates links without overwriting existing entries. It journals each retirement name before
 moving the destination and verifies the moved link before proceeding.
-A successful run clears the pending intents and records the applied build provenance.
+A successful link phase clears the pending intents and records the applied build provenance.
+
+Settings apply after links. If that phase fails, the links stay applied and sync exits non-zero.
 
 ## Ownership ledger
 
