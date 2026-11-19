@@ -369,6 +369,21 @@ mod native {
             rename_new(parent, &item.name, leaf)
         }
 
+        pub fn discard_retired(&mut self, parent: &Root, item: &Quarantine) -> io::Result<()> {
+            let Some(identity) = node_identity(parent, &item.name)? else {
+                return Ok(());
+            };
+            if item.identity != Some(identity)
+                || !matches!(observe(Some(parent), &item.name)?, Observed::Symlink { target }
+                    if same_target(&item.target, &target))
+                || node_identity(parent, &item.name)? != Some(identity)
+            {
+                return Err(io::Error::other("retired link changed before cleanup"));
+            }
+            fs::unlinkat(parent, item.name.as_str(), fs::AtFlags::empty())?;
+            self.sync(parent)
+        }
+
         pub fn sync(&self, dir: &Root) -> io::Result<()> {
             Ok(fs::fsync(dir)?)
         }

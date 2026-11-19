@@ -5,6 +5,7 @@ pub mod cli;
 pub mod config;
 pub mod diagnostics;
 pub mod discovery;
+pub mod doctor;
 pub mod frontmatter;
 pub mod install;
 pub mod inventory;

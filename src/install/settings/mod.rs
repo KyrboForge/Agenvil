@@ -1,16 +1,20 @@
 //! Ownership-aware merging of reviewed settings and hooks into the user's Claude `settings.json`.
 
 mod apply;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod backup;
 mod fragment;
 mod merge;
+mod restore;
 mod state;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests;
 
-pub use apply::{ApplyError, Step, apply, restore};
+pub use apply::{ApplyError, Step, apply};
+pub use backup::Backup;
 pub use fragment::Fragment;
+pub use restore::{
+    RestorePlan, RestoreRecord, restore, restore_apply, restore_backups, restore_plan,
+};
 
 use std::ffi::OsStr;
 use std::fs::Metadata;
@@ -24,7 +28,7 @@ use super::actual::{Resolved, Roots};
 use super::{Locations, Ownership, PlanError};
 use crate::manifest;
 use crate::stage::{PathKind, pinned::Root};
-use state::{Pending, State, User};
+use state::{HookRecord, Pending, State, User, ValueRecord};
 
 pub(super) const SETTINGS: &str = "settings.json";
 /// Bounds every read (the fragment, `settings.json` and `managed.json`) and so every write.
@@ -182,9 +186,6 @@ pub struct Plan {
     state_after: Option<Vec<u8>>,
     #[serde(skip)]
     journal: Option<Vec<u8>>,
-    /// Digest of Agenvil's last `settings.json` write before this plan.
-    #[serde(skip)]
-    last_write: Option<String>,
 }
 
 impl std::fmt::Debug for Plan {
@@ -203,166 +204,248 @@ impl Plan {
     }
 }
 
-/// Plans merging `desired` into the user's settings; `None` removes everything recorded.
+/// Plans merging `desired` into user's settings; `None` removes everything recorded.
 pub fn plan(locations: &Locations, desired: Option<&Fragment>) -> Result<Plan, Error> {
-    let paths = Resolved::load(locations)?;
-    let Roots { claude, state, .. } = paths.open()?;
-    let settings_path = paths.claude.join(SETTINGS);
-    let state_path = paths.local.join("state").join(state::FILE);
-    let unusable = |detail: String| Error::Settings {
-        path: settings_path.clone(),
-        detail,
-    };
-    let settings = read(claude.as_ref(), SETTINGS)
-        .map_err(|err| unusable(err.to_string()))?
-        .map(|(bytes, metadata)| {
-            let seen = seen(&bytes, &metadata);
-            (bytes, seen)
-        });
-    let document = match &settings {
-        None => Value::Object(Default::default()),
-        Some((bytes, _)) => match serde_json::from_slice(bytes) {
-            Ok(value @ Value::Object(_)) => value,
-            Ok(_) => return Err(unusable("the top level is not a JSON object".to_owned())),
-            Err(err) => return Err(unusable(format!("invalid JSON: {err}"))),
-        },
-    };
-    let state_bytes = read(state.as_ref(), state::FILE)
-        .map_err(|err| Error::State {
-            path: state_path.clone(),
-            detail: err.to_string(),
-        })?
-        .map(|(bytes, _)| bytes);
-    let recorded = State::parse(state_bytes.as_deref(), &state_path, &paths.claude)?;
-
-    let digest = settings.as_ref().map(|(_, seen)| seen.digest.clone());
-    let (values, hooks, last_write) = match &recorded.user {
-        None => (Vec::new(), Vec::new(), None),
-        Some(User {
-            pending: Some(pending),
-            ..
-        }) if digest.as_deref() == Some(pending.after.as_str()) => (
-            pending.values.clone(),
-            pending.hooks.clone(),
-            Some(pending.after.clone()),
-        ),
-        Some(user) if user.pending.as_ref().is_none_or(|p| p.before == digest) => (
-            user.values.clone(),
-            user.hooks.clone(),
-            user.last_write.clone(),
-        ),
-        Some(_) => {
-            return Err(Error::State {
-                path: state_path,
-                detail: format!(
-                    "an interrupted apply left {} matching neither its old nor its new content",
-                    settings_path.display()
-                ),
-            });
-        }
-    };
-
+    let inputs = Inputs::load(locations)?;
     let empty = Fragment::default();
-    let outcome = merge::merge(&document, &values, &hooks, desired.unwrap_or(&empty));
-    let settings_after = (outcome.document != document).then(|| {
+    let outcome = merge::merge(
+        &inputs.document,
+        &inputs.values,
+        &inputs.hooks,
+        desired.unwrap_or(&empty),
+    );
+    let settings_after = (outcome.document != inputs.document).then(|| {
         let mut bytes = serde_json::to_vec_pretty(&outcome.document).expect("JSON values encode");
         bytes.push(b'\n');
         bytes
     });
-    let written = match &settings_after {
-        Some(bytes) => Some(manifest::sha256(bytes)),
-        None => last_write.clone(),
-    };
-    let user = |values, hooks, last_write, pending| User {
-        root: paths.claude.clone(),
-        values,
-        hooks,
-        last_write,
-        pending,
-    };
-    let after = (!outcome.values.is_empty() || !outcome.hooks.is_empty() || written.is_some())
-        .then(|| user(outcome.values.clone(), outcome.hooks.clone(), written, None));
-    let encode = |user: Option<&User>| {
-        recorded.encoded(user).map_err(|err| Error::State {
-            path: state_path.clone(),
-            detail: err.to_string(),
-        })
-    };
-    // The old records stay authoritative until the new settings are visible.
-    let journal = settings_after
-        .as_ref()
-        .map(|bytes| {
-            encode(Some(&user(
-                values,
-                hooks,
-                last_write.clone(),
-                Some(Pending {
-                    before: digest,
-                    after: manifest::sha256(bytes),
-                    values: outcome.values,
-                    hooks: outcome.hooks,
-                }),
-            )))
-        })
-        .transpose()?;
-    // A journal is always settled, even when the final records equal the old ones.
-    let state_after = (after != recorded.user || journal.is_some())
-        .then(|| encode(after.as_ref()))
-        .transpose()?;
-
-    // What is written must stay readable by the next run.
-    let oversized =
-        |bytes: &Option<Vec<u8>>| bytes.as_ref().is_some_and(|b| b.len() as u64 > MAX_BYTES);
-    let too_large = "the result would exceed the 8 MiB size limit; nothing was changed".to_owned();
-    if oversized(&settings_after) {
-        return Err(unusable(too_large));
-    }
-    if oversized(&state_after) || oversized(&journal) {
-        return Err(Error::Settings {
-            path: state_path,
-            detail: too_large,
-        });
-    }
-
-    let action = |before: bool, after: bool| match (before, after) {
-        (_, false) => FileAction::Unchanged,
-        (false, true) => FileAction::Create,
-        (true, true) => FileAction::Modify,
-    };
-    let mut summary = Summary::default();
-    for op in &outcome.operations {
-        *match op.operation {
-            OperationKind::Add => &mut summary.add,
-            OperationKind::Change => &mut summary.change,
-            OperationKind::Remove => &mut summary.remove,
-            OperationKind::Noop => &mut summary.noop,
-            OperationKind::Conflict => &mut summary.conflict,
-        } += 1;
-    }
-    Ok(Plan {
-        root: paths.claude.clone(),
-        operations: outcome.operations,
-        files: Files {
-            settings: FileChange {
-                path: settings_path,
-                action: action(settings.is_some(), settings_after.is_some()),
-            },
-            state: FileChange {
-                path: state_path,
-                action: action(state_bytes.is_some(), state_after.is_some()),
-            },
-        },
-        summary,
-        locations: locations.clone(),
-        paths,
-        settings,
+    inputs.transaction(
+        outcome.operations,
+        outcome.values,
+        outcome.hooks,
         settings_after,
-        state_digest: state_bytes.as_deref().map(manifest::sha256),
-        state_before: state_bytes,
-        state_after,
-        journal,
-        last_write,
-    })
+    )
+}
+
+struct Inputs {
+    locations: Locations,
+    paths: Resolved,
+    settings: Option<(Vec<u8>, Seen)>,
+    document: Value,
+    state_bytes: Option<Vec<u8>>,
+    recorded: State,
+    values: Vec<ValueRecord>,
+    hooks: Vec<HookRecord>,
+    last_write: Option<String>,
+    digest: Option<String>,
+}
+
+impl Inputs {
+    fn load(locations: &Locations) -> Result<Self, Error> {
+        let paths = Resolved::load(locations)?;
+        let Roots { claude, state, .. } = paths.open()?;
+        let settings_path = paths.claude.join(SETTINGS);
+        let state_path = paths.local.join("state").join(state::FILE);
+        let unusable = |detail| settings_error(&settings_path, detail);
+        let settings = read(claude.as_ref(), SETTINGS)
+            .map_err(|err| unusable(err.to_string()))?
+            .map(|(bytes, metadata)| {
+                let seen = seen(&bytes, &metadata);
+                (bytes, seen)
+            });
+        let document = match &settings {
+            None => Value::Object(Default::default()),
+            Some((bytes, _)) => match serde_json::from_slice(bytes) {
+                Ok(value @ Value::Object(_)) => value,
+                Ok(_) => return Err(unusable("the top level is not a JSON object".to_owned())),
+                Err(err) => return Err(unusable(format!("invalid JSON: {err}"))),
+            },
+        };
+        let state_bytes = read(state.as_ref(), state::FILE)
+            .map_err(|err| Error::State {
+                path: state_path.clone(),
+                detail: err.to_string(),
+            })?
+            .map(|(bytes, _)| bytes);
+        let recorded = State::parse(state_bytes.as_deref(), &state_path, &paths.claude)?;
+
+        let digest = settings.as_ref().map(|(_, seen)| seen.digest.clone());
+        let (values, hooks, last_write) = match &recorded.user {
+            None => (Vec::new(), Vec::new(), None),
+            Some(User {
+                pending: Some(pending),
+                ..
+            }) if digest.as_deref() == Some(pending.after.as_str()) => (
+                pending.values.clone(),
+                pending.hooks.clone(),
+                Some(pending.after.clone()),
+            ),
+            Some(user) if user.pending.as_ref().is_none_or(|p| p.before == digest) => (
+                user.values.clone(),
+                user.hooks.clone(),
+                user.last_write.clone(),
+            ),
+            Some(_) => {
+                return Err(Error::State {
+                    path: state_path,
+                    detail: format!(
+                        "an interrupted apply left {} matching neither its old nor its new content",
+                        settings_path.display()
+                    ),
+                });
+            }
+        };
+
+        Ok(Self {
+            locations: locations.clone(),
+            paths,
+            settings,
+            document,
+            state_bytes,
+            recorded,
+            values,
+            hooks,
+            last_write,
+            digest,
+        })
+    }
+
+    fn transaction(
+        self,
+        operations: Vec<Operation>,
+        new_values: Vec<ValueRecord>,
+        new_hooks: Vec<HookRecord>,
+        settings_after: Option<Vec<u8>>,
+    ) -> Result<Plan, Error> {
+        let Self {
+            locations,
+            paths,
+            settings,
+            state_bytes,
+            recorded,
+            values,
+            hooks,
+            last_write,
+            digest,
+            ..
+        } = self;
+        let settings_path = paths.claude.join(SETTINGS);
+        let state_path = paths.local.join("state").join(state::FILE);
+        let written = match &settings_after {
+            Some(bytes) => Some(manifest::sha256(bytes)),
+            None => last_write.clone(),
+        };
+        let user = |values, hooks, last_write, pending| User {
+            root: paths.claude.clone(),
+            values,
+            hooks,
+            last_write,
+            pending,
+        };
+        let after = (!new_values.is_empty() || !new_hooks.is_empty() || written.is_some())
+            .then(|| user(new_values.clone(), new_hooks.clone(), written, None));
+        let encode = |user: Option<&User>| {
+            recorded.encoded(user).map_err(|err| Error::State {
+                path: state_path.clone(),
+                detail: err.to_string(),
+            })
+        };
+        // The old records stay authoritative until the new settings are visible.
+        let journal = settings_after
+            .as_ref()
+            .map(|bytes| {
+                encode(Some(&user(
+                    values,
+                    hooks,
+                    last_write.clone(),
+                    Some(Pending {
+                        before: digest,
+                        after: manifest::sha256(bytes),
+                        values: new_values,
+                        hooks: new_hooks,
+                    }),
+                )))
+            })
+            .transpose()?;
+        // A journal is always settled, even when the final records equal the old ones.
+        let state_after = (after != recorded.user || journal.is_some())
+            .then(|| encode(after.as_ref()))
+            .transpose()?;
+
+        // What is written must stay readable by the next run.
+        let oversized =
+            |bytes: &Option<Vec<u8>>| bytes.as_ref().is_some_and(|b| b.len() as u64 > MAX_BYTES);
+        let too_large =
+            "the result would exceed the 8 MiB size limit; nothing was changed".to_owned();
+        if oversized(&settings_after) {
+            return Err(settings_error(&settings_path, too_large));
+        }
+        if oversized(&state_after) || oversized(&journal) {
+            return Err(Error::Settings {
+                path: state_path,
+                detail: too_large,
+            });
+        }
+
+        let action = |before: bool, after: bool| match (before, after) {
+            (_, false) => FileAction::Unchanged,
+            (false, true) => FileAction::Create,
+            (true, true) => FileAction::Modify,
+        };
+        let mut summary = Summary::default();
+        for op in &operations {
+            *match op.operation {
+                OperationKind::Add => &mut summary.add,
+                OperationKind::Change => &mut summary.change,
+                OperationKind::Remove => &mut summary.remove,
+                OperationKind::Noop => &mut summary.noop,
+                OperationKind::Conflict => &mut summary.conflict,
+            } += 1;
+        }
+        Ok(Plan {
+            root: paths.claude.clone(),
+            operations,
+            files: Files {
+                settings: FileChange {
+                    path: settings_path,
+                    action: action(settings.is_some(), settings_after.is_some()),
+                },
+                state: FileChange {
+                    path: state_path,
+                    action: action(state_bytes.is_some(), state_after.is_some()),
+                },
+            },
+            summary,
+            locations,
+            paths,
+            settings,
+            settings_after,
+            state_digest: state_bytes.as_deref().map(manifest::sha256),
+            state_before: state_bytes,
+            state_after,
+            journal,
+        })
+    }
+}
+
+fn settings_error(path: &std::path::Path, detail: String) -> Error {
+    Error::Settings {
+        path: path.to_owned(),
+        detail,
+    }
+}
+
+/// Report a pending journal without reading or interpreting `settings.json`.
+pub(super) fn has_pending(paths: &Resolved, root: Option<&Root>) -> Result<bool, Error> {
+    let path = paths.local.join("state").join(state::FILE);
+    let bytes = read(root, state::FILE)
+        .map_err(|err| Error::State {
+            path: path.clone(),
+            detail: err.to_string(),
+        })?
+        .map(|(bytes, _)| bytes);
+    let state = State::parse(bytes.as_deref(), &path, &paths.claude)?;
+    Ok(state.user.is_some_and(|user| user.pending.is_some()))
 }
 
 /// A bounded read of a regular file directly in `dir`; symlinks and special files are refused.

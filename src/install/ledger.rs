@@ -89,7 +89,7 @@ pub(super) struct Entry {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) enum Intent {
+pub enum Intent {
     #[serde(rename = "create")]
     Create,
     #[serde(rename = "update")]
@@ -269,7 +269,7 @@ impl Ledger {
                             "invalid Claude user root or applied provenance".to_owned(),
                         ));
                     }
-                    if !same_target(&user.root, root) {
+                    if !user.entries.is_empty() && !same_target(&user.root, root) {
                         return Err(LedgerError::Root {
                             path: path.clone(),
                             recorded: user.root,
@@ -295,6 +295,7 @@ impl Ledger {
                     Ok(user)
                 })
                 .transpose()?
+                .filter(|user| !user.entries.is_empty())
         } else {
             None
         };
@@ -321,11 +322,19 @@ impl Ledger {
             .map(|claude| serde_json::from_str(claude.get()))
             .transpose()?
             .unwrap_or_default();
-        scopes.insert("user".to_owned(), serde_json::value::to_raw_value(user)?);
-        envelope.harnesses.insert(
-            "claude".to_owned(),
-            RawValue::from_string(serde_json::to_string_pretty(&scopes)?)?,
-        );
+        if user.entries.is_empty() {
+            scopes.remove("user");
+        } else {
+            scopes.insert("user".to_owned(), serde_json::value::to_raw_value(user)?);
+        }
+        if scopes.is_empty() {
+            envelope.harnesses.remove("claude");
+        } else {
+            envelope.harnesses.insert(
+                "claude".to_owned(),
+                RawValue::from_string(serde_json::to_string_pretty(&scopes)?)?,
+            );
+        }
         let mut bytes = serde_json::to_vec_pretty(&envelope)?;
         bytes.push(b'\n');
         if bytes.len() as u64 > manifest::MAX_BYTES {

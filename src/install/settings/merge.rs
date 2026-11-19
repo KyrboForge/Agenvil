@@ -356,6 +356,16 @@ fn remove_hook(out: &mut Outcome, record: &HookRecord, prune: &mut BTreeSet<Stri
     }
 }
 
+pub(super) fn matches_value(document: &Value, record: &ValueRecord) -> bool {
+    let parts = tokens(&record.pointer).expect("validated record pointer");
+    matches!(lookup(document, &parts), Ok(Some(value)) if *value == record.value)
+}
+
+pub(super) fn matches_hook(document: &Value, record: &HookRecord) -> bool {
+    groups(document, &record.event)
+        .is_ok_and(|current| recorded_group_index(current, &record.group).is_ok())
+}
+
 fn recorded_group_index(groups: &[Value], recorded: &Value) -> Result<usize, Reason> {
     let mut exact = groups
         .iter()
