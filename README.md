@@ -33,7 +33,7 @@ For existing TAK-style configurations, see [migration guidance](docs/compatibili
 | `agenvil build --target claude --check [--out DIR]` | read-only, offline | compare the staging tree with what the sources generate; never creates it ([`docs/build.md`](docs/build.md#drift-checks-build---check)) |
 | `agenvil build --target claude --clean [--apply]` | dry run unless `--apply` | remove stale generated files, only those whose digests still match ([`docs/build.md`](docs/build.md#cleanup---clean)) |
 | `agenvil build --target claude [--out DIR]` | writes `.generated/claude/` | build a Claude-native staging tree from the sources; never installs, never touches `~/.claude` ([`docs/build.md`](docs/build.md)) |
-| `agenvil sync --target claude [--dry-run\|--apply] [--out DIR] [--format human\|json]` | dry run unless `--apply`, offline | reconcile user-level Claude agents, skills and rules from approved staging and the private layer ([`docs/managed-install.md`](docs/managed-install.md)) |
+| `agenvil sync --target claude [--dry-run\|--apply] [--out DIR] [--format human\|json]` | dry run unless `--apply`, offline | reconcile user-level Claude resource links and kit-declared settings ([`docs/managed-install.md`](docs/managed-install.md)) |
 | `agenvil settings --target claude (--fragment FILE\|--remove) [--dry-run\|--apply] [--format human\|json]` | dry run unless `--apply`, offline | merge managed values and hooks into the user-level `settings.json`, with ownership, backups and conflicts ([`docs/managed-settings.md`](docs/managed-settings.md)) |
 | `agenvil doctor --target claude [--out DIR] [--format human\|json]` | read-only, offline | diagnose Claude install, settings and prerequisites ([lifecycle guide](docs/lifecycle.md#doctor)) |
 | `agenvil uninstall --target claude [--dry-run\|--apply] [--format human\|json]` | dry run unless `--apply`, offline | detach recorded Claude links and settings ([lifecycle guide](docs/lifecycle.md#uninstall)) |
@@ -184,14 +184,15 @@ portability model and future target-specific extension points.
 
 ## `agenvil sync`
 
-`agenvil sync --target claude` checks the staging tree and previews which user-level Claude agents,
-skills and rules it would link, update or remove. Pass `--dry-run` to preview explicitly or
-`--apply` to install the plan. Sync tracks
-individual links in an ownership ledger and preserves user-owned entries. Installed links belong
-to the checkout that applied them; sync from another checkout is refused even under the same
-`[project].name`. Sync does not touch settings. See [managed install](docs/managed-install.md)
-for paths, private overrides and recovery, and the [Claude lifecycle guide](docs/lifecycle.md)
-for doctor, uninstall and settings restore.
+`agenvil sync --target claude` verifies staging and previews changes to user-level Claude
+resource links and settings. Dry run is the default. Pass `--apply` after reviewing the plan.
+Agenvil tracks installed links in an ownership ledger bound to the kit and checkout and
+preserves user-owned entries.
+
+To manage selected Claude values and hooks, declare `fragment = "config/claude-settings.json"`
+under `[targets.claude.settings]` in `agenvil.toml`. Review any new or changed hook commands in
+the preview before applying. See the [example kit and settings guide](docs/managed-settings.md#kit-declaration),
+[managed install](docs/managed-install.md) and the [Claude lifecycle guide](docs/lifecycle.md).
 
 ## `agenvil check`
 

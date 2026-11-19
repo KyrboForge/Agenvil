@@ -18,13 +18,21 @@ commands when using custom staging. Sync also reads local private resources, whi
 matching team resources. See [managed install](managed-install.md) for paths and conflict
 recovery.
 
-Sync does not touch settings. To install selected values and hook groups, preview and apply a
-[settings fragment](managed-settings.md#fragments) separately.
+Sync validates the [kit settings fragment](managed-settings.md#kit-declaration) before planning
+links and settings. Review the `Claude settings` section in the default dry run. It shows
+operations and hook events, with commands for hook additions and changes. With
+`--format json`, the plan includes a `settings` object.
 
-```sh
-agenvil settings --target claude --fragment fragment.json
-agenvil settings --target claude --fragment fragment.json --apply
-```
+A settings conflict returns exit `1` and blocks all changes. Apply reconciles links first,
+then settings. If settings fail after links apply, sync exits non-zero with
+`links applied; settings failed; re-run sync to retry`. Resolve the reported error and retry.
+Once both phases are settled, another sync with unchanged inputs is a no-op.
+
+To update settings, edit the fragment and preview sync again. Removing entries or dropping
+the declaration removes the corresponding recorded entries under the
+[merge rules](managed-settings.md#merge-rules). A kit with no declaration also reconciles away
+settings recorded by the standalone `agenvil settings --fragment` command. To detach both links
+and settings, use [uninstall](#uninstall).
 
 ## Agenvil owns vs the user owns
 
@@ -45,8 +53,9 @@ agenvil doctor --target claude --format json
 Doctor can report an invalid project config. It reads local files and searches `PATH` for
 prerequisites without executing them. It creates no files or locks and makes no network calls.
 Use `--out DIR` if the kit was built into custom staging. Link checks require approved staging.
-Settings, journal and prerequisite checks still run when the source config or staging blocks
-link checks.
+Settings and journal checks are independent of staging. `settings.source` requires a loaded
+project config. `settings.desired` also requires a valid fragment or a config with no declaration.
+Doctor performs no RTK or Headroom probes.
 
 The report uses these statuses in JSON and labels in human output.
 
@@ -66,7 +75,9 @@ The report uses these statuses in JSON and labels in human output.
 | `links.ownership` | healthy, drifted, user_action_required, unsupported | Compares link ownership and actual destinations with the desired install | Check the ledger and resolved Claude root. Preview sync from the recorded checkout. |
 | `links.missing` | missing | A desired link is absent or a managed link target is broken | Verify the source or snapshot, then preview and apply sync. |
 | `links.conflict` | drifted, user_action_required | An occupant, broken ownership or an unsafe path blocks reconciliation | Preserve the reported entry and resolve the [link conflict](managed-install.md#conflicts) before applying. |
-| `settings.consistency` | healthy, drifted, user_action_required | Checks for edited or missing records, type clashes and settings read errors | Review the reported edit, missing entry or invalid file. Follow the [merge rules](managed-settings.md#merge-rules) before applying again. |
+| `settings.consistency` | healthy, drifted, user_action_required | Checks for edited or missing managed entries, type clashes, duplicate hook groups and settings planning errors | Review the reported settings or state file and follow the [merge rules](managed-settings.md#merge-rules) before applying again. |
+| `settings.source` | healthy, missing, user_action_required | A valid fragment or no declaration is healthy. A missing file is missing. Invalid or unsafe fragments require action. | Restore the fragment or fix the reported path or content before retrying sync. |
+| `settings.desired` | healthy, drifted, user_action_required | Settings match the kit, need reconciliation, or have a planning error or conflict | Preview sync and review the settings operations. Resolve reported errors or conflicts before applying. |
 | `operations.interrupted` | healthy, user_action_required | Checks for pending link intents or a settings journal | Fix reported state errors. For pending changes, preview the interrupted operation and retry with `--apply` once conflicts are resolved. |
 | `prereq.claude_cli` | healthy, missing | Optional `claude` executable is discoverable on `PATH` | Install Claude Code or update `PATH` if you need the CLI. |
 | `prereq.git` | healthy, missing | Optional `git` executable is discoverable on `PATH` | Install Git or update `PATH` if you need Git operations. |
@@ -81,7 +92,7 @@ counts, and a stable-order `checks` array. Each check has `id`, `status`, `requi
 `summary`, with `detail`, `remediation` and `subject` when applicable. The same inputs
 produce the same JSON. The overall status is the highest-priority required finding, ordered
 `user_action_required`, `authentication_required`, `drifted`, then required `missing`. With
-no findings it is `healthy`. Preview settings changes separately.
+no findings it is `healthy`. Preview settings changes with `agenvil sync --target claude --dry-run`.
 
 A human report for a missing managed rule includes this check.
 
@@ -172,6 +183,8 @@ Future consumer `init` and `update` commands can compose `install::lifecycle` us
 `install::Locations` for planning and apply:
 
 - `sync_plan` and `sync_apply` reconcile the approved staging tree and private layer.
+- `source_settings`, `SyncPlan::with_settings` and `sync_with_settings_apply` load the kit
+  fragment and compose link and settings reconciliation.
 - `settings_plan` and `settings_apply` handle a reviewed settings fragment independently.
 - `uninstall_plan` and `uninstall_apply` detach the recorded install.
 - `restore_backups`, `restore_plan` and `restore_apply` list and restore settings backups.

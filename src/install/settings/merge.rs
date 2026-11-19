@@ -106,6 +106,7 @@ fn op(
         kind,
         target: target.to_owned(),
         event: event.map(str::to_owned),
+        commands: None,
         ownership,
         reason,
     });

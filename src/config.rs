@@ -161,6 +161,7 @@ pub struct ClaudeTarget {
     /// Explicit source-pair to target-pair overrides. A pair without an entry is used as is, or
     /// rejected when Claude does not support it; there is no implicit fallback.
     pub map: Vec<PairMap>,
+    pub settings: Option<ClaudeSettings>,
 }
 
 impl Default for ClaudeTarget {
@@ -168,8 +169,15 @@ impl Default for ClaudeTarget {
         Self {
             enabled: true,
             map: Vec::new(),
+            settings: None,
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClaudeSettings {
+    pub fragment: RelPath,
 }
 
 #[derive(Debug, Default, Deserialize)]

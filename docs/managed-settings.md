@@ -1,11 +1,60 @@
-# `agenvil settings --target claude`
+# Managed Claude settings
 
-`agenvil settings` merges a small set of managed values and hooks into the user-level Claude
-settings file, `<claude_root>/settings.json`. The Claude root is `CLAUDE_CONFIG_DIR`, else
+Sync and the standalone `agenvil settings` command merge managed values and hooks into the
+user-level Claude settings file, `<claude_root>/settings.json`. The Claude root is `CLAUDE_CONFIG_DIR`, else
 `~/.claude`, resolved as for [sync](managed-install.md). It never reads or writes
 `settings.local.json`, project settings or enterprise-managed settings, and it enforces nothing
-organizational: a user can always edit or remove what it wrote. The command needs no
-`agenvil.toml`.
+organizational: a user can always edit or remove what Agenvil wrote.
+
+## Kit declaration
+
+Declare one schema-1 [fragment](#fragments) in `agenvil.toml`. The path is relative to the kit
+root, including when using `--config`. The fragment must be a regular file of at most 8 MiB.
+Absolute paths, parent traversal and symlinks within the fragment path are refused.
+
+The complete example kit lives in [`examples/kit-settings/`](../examples/kit-settings).
+Its `agenvil.toml` declares the fragment.
+
+```toml
+schema = 1
+
+[project]
+name = "kit-settings"
+
+[targets.claude.settings]
+fragment = "config/claude-settings.json"
+```
+
+Its `config/claude-settings.json` contains one hook group.
+
+```json
+{
+  "schema": 1,
+  "hooks": [
+    {
+      "id": "rtk-pretooluse",
+      "event": "PreToolUse",
+      "group": {
+        "matcher": "Bash",
+        "hooks": [{ "type": "command", "command": "true" }]
+      }
+    }
+  ]
+}
+```
+
+Build the kit and review the sync preview before applying. Kit hook commands are
+security-sensitive because Claude can run them when the configured event fires. Agenvil never
+runs hook commands during validation, build, planning or apply. Passing `sync --apply` is
+explicit consent to install the reviewed hooks. Consumer consent orchestration is tracked in
+[issue #18](https://github.com/KyrboForge/Agenvil/issues/18) and
+[issue #45](https://github.com/KyrboForge/Agenvil/issues/45).
+
+## Standalone settings command
+
+`agenvil settings --fragment` is an advanced standalone operation and needs no `agenvil.toml`.
+It uses the same ownership records as sync. A later sync reconciles those records against the
+kit fragment, or removes owned entries under the merge rules if the kit has no declaration.
 
 ```sh
 agenvil settings --target claude --fragment managed.json            # dry run (the default)
@@ -90,6 +139,9 @@ records the digest of the last `settings.json` that Agenvil wrote. `ownership.js
 
 ## Dry run and apply
 
+Sync includes `commands` in JSON for added or changed hook groups and prints them in the human
+`Claude settings` section.
+
 Planning only reads: it creates no directories, locks or files. Each operation reports
 `operation` (add, change, remove, noop, conflict), `kind` (value, hook), `target` (a pointer or
 hook id), `event` for hooks, `ownership` (managed, unmanaged, absent, mismatch) and `reason`. The
@@ -133,10 +185,17 @@ Exit codes: 0 on success, 1 for conflicts, a busy lock, or files that changed si
 2 for an invalid fragment or settings file, unsafe paths and other usage errors. Windows plans
 read-only; apply fails closed.
 
+## Future RTK hook
+
+The example `PreToolUse` hook uses the stable ID `rtk-pretooluse` and the placeholder command
+`true`. It illustrates how an RTK provenance hook can be declared. Real RTK activation
+requires a verified executable at a stable managed path and is tracked in
+[issue #43](https://github.com/KyrboForge/Agenvil/issues/43),
+[issue #48](https://github.com/KyrboForge/Agenvil/issues/48) and
+[issue #38](https://github.com/KyrboForge/Agenvil/issues/38).
+Agenvil does not install RTK, run `rtk init --global` or assume `rtk` is on `PATH`.
+
 ## Future work
 
-- Wire fragments from kit sources instead of a file passed on the command line.
-- An RTK provenance hook is just another fragment hook (for example `rtk-pretooluse`); no adapter
-  exists yet.
 - Unmanaged numbers beyond 64-bit range or in exponent form are re-encoded when the file is
   rewritten (serde_json without `arbitrary_precision`).
